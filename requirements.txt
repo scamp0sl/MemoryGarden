@@ -1,0 +1,47 @@
+# Web Framework
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+# Database
+sqlalchemy
+psycopg2-binary
+alembic
+redis
+qdrant-client
+
+# AI/ML
+anthropic
+openai
+kiwipiepy
+numpy
+scikit-learn
+
+# Task Queue
+celery
+
+# Utilities
+python-dotenv
+httpx
+aiohttp
+tenacity
+python-jose[cryptography]
+python-multipart
+
+# Logging & Monitoring
+structlog
+sentry-sdk
+
+# Testing
+pytest
+pytest-asyncio
+pytest-cov
+pytest-mock
+faker
+
+# Code Quality
+black
+isort
+flake8
+mypy

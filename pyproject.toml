@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pydantic-settings>=2.12.0",
+]
 
 [tool.black]
 line-length = 88
@@ -27,3 +29,5 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --cov=. --cov-report=term-missing"
+markers = ["asyncio: async test", "integration: integration test with real APIs (slow)"]
+

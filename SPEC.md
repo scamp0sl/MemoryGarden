@@ -50,6 +50,74 @@
 - ? 데이터 보안 (AES-256 암호화, GDPR 준수)			
 			
 ---			
+
+### 1.4 비용 추정 (MVP 기준)
+
+#### 1.4.1 LLM API 비용
+
+**사용량 가정:**
+- MVP: 20명 사용자
+- 일일 대화: 3회/인
+- 월간 대화: 20명 × 3회 × 30일 = 1,800회
+
+**Claude 4.5 Sonnet 비용:**
+입력: 평균 2,000 tokens/요청 (시스템 프롬프트 + 컨텍스트)
+출력: 평균 200 tokens/응답
+월간 토큰:
+
+Input: 1,800회 × 2,000 tokens = 3,600,000 tokens
+Output: 1,800회 × 200 tokens = 360,000 tokens
+
+비용:
+
+Input: $3 / 1M tokens = $10.8
+Output: $15 / 1M tokens = $5.4
+합계: $16.2/월
+
+**Embedding API 비용 (OpenAI):**
+월간 임베딩 요청: 1,800회
+평균 입력: 500 tokens
+비용: 1,800 × 500 / 1M × $0.13 = $0.12/월
+
+**Vision API 비용 (GPT-4o):**
+이미지 분석: 1회/일 × 20명 × 30일 = 600회
+비용: 600회 × $0.01 = $6/월
+
+**LLM 총 비용: $22.32/월**
+
+#### 1.4.2 인프라 비용 (AWS 기준)
+EC2 (t3.medium × 1):  $30/월
+RDS PostgreSQL (db.t3.small): $25/월
+ElastiCache Redis (cache.t3.micro): $15/월
+S3 (이미지 저장 50GB): $1.15/월
+Qdrant Cloud (Starter): $25/월
+인프라 총 비용: $96.15/월
+
+#### 1.4.3 총 비용 정리
+
+| 단계 | 사용자 수 | LLM 비용 | 인프라 비용 | 총 비용 |
+|------|----------|----------|-------------|---------|
+| MVP | 20명 | $22 | $96 | **$118/월** |
+| Beta | 200명 | $220 | $250 | **$470/월** |
+| Launch | 1,000명 | $1,100 | $800 | **$1,900/월** |
+| Scale | 10,000명 | $11,000 | $3,500 | **$14,500/월** |
+
+**1인당 비용:** $1.45/월 (Scale 기준)
+
+#### 1.4.4 비용 최적화 전략
+
+1. **LLM 비용 절감**
+   - 프롬프트 압축 (불필요한 컨텍스트 제거)
+   - 캐싱 활용 (동일 질문 재사용)
+   - 간단한 응답은 규칙 기반 처리
+
+2. **인프라 비용 절감**
+   - Reserved Instances (1년 약정 시 40% 할인)
+   - Auto Scaling (야간 트래픽 감소)
+   - S3 Intelligent-Tiering
+
+3. **예상 절감액:** 월 20-30%
+
 			
 ## 2. 기능 요구사항			
 			
@@ -78,15 +146,15 @@
 #### 2.1.2 MCDI 분석 프레임워크			
 			
 **6개 분석 지표:**			
-MCDI = w₁·LR + w₂·SD + w₃·NC + w₄·TO + w?·ER + w?·RT			
+MCDI = w₁·LR + w₂·SD + w₃·NC + w₄·TO + w5·ER + w6·RT			
 			
 가중치 (초기값, 임상 데이터로 최적화 예정):
  w₁ = 0.20 (LR: Lexical Richness)
  w₂ = 0.20 (SD: Semantic Drift)
  w₃ = 0.15 (NC: Narrative Coherence)
  w₄ = 0.15 (TO: Temporal Orientation)
- w? = 0.20 (ER: Episodic Recall)
- w? = 0.10 (RT: Response Time)			
+ w5 = 0.20 (ER: Episodic Recall)
+ w6 = 0.10 (RT: Response Time)			
 			
 **지표별 상세:**			
 			
@@ -180,6 +248,223 @@ Layer 4: Analytical Memory (TimescaleDB)
  - 치매안심센터 연동 api			
 			
 ---			
+### 2.3 프롬프트 엔지니어링
+
+#### 2.3.1 시스템 프롬프트 (정원사 페르소나)
+
+```python
+# config/prompts.py
+
+SYSTEM_PROMPT = """
+당신은 '기억의 정원'의 정원사입니다.
+
+## 역할
+- 사용자의 친근한 동행자로서 매일 2-3회 대화를 나눕니다
+- "평가"나 "검사"가 아닌, 정원을 함께 가꾸는 자연스러운 대화를 추구합니다
+- 사용자의 일상, 추억, 감정을 존중하며 경청합니다
+
+## 대화 원칙
+1. 존댓말 사용 (70대 이상 대상)
+2. 이모지 절제적 사용 (1-2개/메시지)
+3. 짧은 문장 (2문장 이내)
+4. 열린 질문 선호 ("예/아니오" 질문 지양)
+5. 긍정적 피드백 ("잘 기억하시네요!", "멋진 추억이에요")
+
+## 금기사항
+- "치매", "검사", "평가" 같은 의학적 용어 사용 금지
+- 사용자를 시험하는 듯한 태도 금지
+- 틀린 답에 대한 지적 금지
+- 과도한 걱정/동정 금지
+
+## 예시 대화
+좋은 예:
+- "오늘 점심 뭐 드셨어요? 사진 찍으셨으면 정원에 올려주세요! ??"
+- "어제 말씀하신 딸 이름이 수진이었죠? 수진 씨는 어떤 일을 하시나요?"
+
+나쁜 예:
+- "기억력 테스트입니다. 아침 식사 메뉴를 정확히 말씀해주세요."
+- "틀렸습니다. 다시 생각해보세요."
+"""
+
+### 2.4 온보딩 플로우
+
+#### 2.4.1 첫 대화 시나리오
+[Day 0: 첫 만남]
+Bot: 안녕하세요! ?? 저는 '기억의 정원' 정원사예요.
+앞으로 매일 잠깐씩 이야기 나누며 함께 정원을 가꿔갈 거예요.
+
+먼저 어떻게 부르면 좋을까요?
+
+User: [이름 입력]
+Bot: {이름}님, 반갑습니다! ??
+{이름}님만의 특별한 정원을 만들어볼까요?
+정원 이름은 뭐로 하면 좋을까요?
+(예: 수진이네 정원, 행복한 정원)
+User: [정원 이름 입력]
+Bot: 좋아요! '{정원명}'이 생겼네요! ??
+
+앞으로 매일 2-3번 정도 가볍게 물어볼게요.
+ - 오늘 드신 음식 ??
+ - 옛날 추억 이야기 ??
+ - 간단한 놀이 ??
+ 
+ 부담 갖지 마시고, 편하게 이야기 나눠요!
+ 
+ 첫 번째 질문 드릴게요.
+ 오늘 점심은 뭐 드셨어요?
+
+#### 2.4.2 Baseline 수집 기간 (Day 1-14)
+
+**전략:**
+Week 1 (Day 1-7): 관계 형성 + 기본 데이터 수집
+
+일일 2회 대화 (점심, 저녁)
+가벼운 질문 위주 (음식, 날씨, 기분)
+전기적 정보 자연스럽게 수집
+
+"고향이 어디세요?"
+"자녀분은 몇 분이세요?"
+"젊었을 때 무슨 일 하셨어요?"
+
+
+
+Week 2 (Day 8-14): 다양한 카테고리 노출
+
+일일 2-3회 대화
+6개 카테고리 골고루 경험
+사용자 선호 파악
+
+어떤 주제에 반응이 좋은가?
+어떤 시간대에 답변이 빠른가?
+
+
+
+Day 15: Baseline 설정
+
+14일간 데이터 집계
+개인별 MCDI baseline 계산
+표준편차 계산
+이후부터 이상 감지 시작
+
+#### 2.4.3 보호자 연결 프로세스
+[사용자 온보딩 완료 후]
+Bot: {이름}님, 혹시 가족분께도 정원 소식을 알려드릴까요?
+따님이나 아드님 전화번호를 알려주시면,
+정원이 예쁘게 자라고 있다는 소식을 가끔 전해드려요! ??
+User: [보호자 연락처 입력]
+Bot: 감사합니다! 곧 인사드릴게요 ??
+
+[보호자에게 카카오톡 발송]
+안녕하세요, '기억의 정원' 입니다.
+{사용자명}님께서 보호자로 등록해주셨어요.
+▶? 기억의 정원이란?
+매일 가벼운 대화로 어르신의 인지 건강을
+지켜드리는 AI 서비스입니다.
+▶? 보호자 대시보드
+
+주간 대화 요약
+관찰 포인트
+권장 조치사항
+
+[대시보드 바로가기] 버튼
+
+[보호자 앱 초기 화면]
+?? {사용자명}님 정원 현황
+? 온보딩 완료 (Day 3/14)
+?? Baseline 수집 중...
+?? 오늘 대화: 2회 완료
+※ 2주 후부터 상세 분석이 제공됩니다.
+현재는 어르신과 친해지는 기간이에요 ??
+
+#### 2.4.4 중도 이탈 방지 전략
+
+```python
+# tasks/engagement_monitor.py
+
+@celery.task
+async def check_inactive_users():
+    """24시간 무응답 사용자 체크"""
+    
+    inactive_users = db.query(User).filter(
+        User.last_interaction_at < datetime.now() - timedelta(hours=24)
+    ).all()
+    
+    for user in inactive_users:
+        days_inactive = (datetime.now() - user.last_interaction_at).days
+        
+        if days_inactive == 1:
+            # 1일차: 가벼운 리마인더
+            send_message(user.kakao_id, 
+                "?? 정원이 {이름}님을 기다리고 있어요! 오늘 어떻게 지내셨나요?")
+        
+        elif days_inactive == 3:
+            # 3일차: 보호자 알림 + 사용자 독려
+            send_guardian_alert(user.id, "concern", 
+                "3일간 대화가 없어요. 어르신께 확인 부탁드려요.")
+            send_message(user.kakao_id,
+                "정원에 비가 내리고 있어요 ?? 괜찮으신가요?")
+        
+        elif days_inactive >= 7:
+            # 7일차: 온보딩 재시작 제안
+            send_message(user.kakao_id,
+                "오랜만이에요! 다시 시작해볼까요? ??")
+
+### 2.5 스케줄링 전략
+
+#### 2.5.1 Celery Beat 스케줄
+
+```python
+# tasks/celery_app.py
+
+from celery.schedules import crontab
+
+app.conf.beat_schedule = {
+    # 오전 인사 (10:00-11:00)
+    'morning-greeting': {
+        'task': 'tasks.dialogue.send_morning_message',
+        'schedule': crontab(hour=10, minute=0),
+    },
+    
+    # 점심 체크 (11:30-12:30)
+    'lunch-check': {
+        'task': 'tasks.dialogue.send_lunch_question',
+        'schedule': crontab(hour=11, minute=30),
+    },
+    
+    # 오후 회상 질문 (14:00-15:00)
+    'afternoon-reminiscence': {
+        'task': 'tasks.dialogue.send_reminiscence_question',
+        'schedule': crontab(hour=14, minute=0),
+        'kwargs': {'category': 'reminiscence'}
+    },
+    
+    # 저녁 일화 기억 체크 (18:00-19:00)
+    'evening-recall': {
+        'task': 'tasks.dialogue.send_recall_question',
+        'schedule': crontab(hour=18, minute=0),
+    },
+    
+    # 일일 리포트 생성 (23:00)
+    'daily-report': {
+        'task': 'tasks.analysis.generate_daily_report',
+        'schedule': crontab(hour=23, minute=0),
+    },
+    
+    # 주간 리포트 (일요일 22:00)
+    'weekly-report': {
+        'task': 'tasks.analysis.generate_weekly_report',
+        'schedule': crontab(day_of_week='sunday', hour=22, minute=0),
+    },
+    
+    # 비활성 사용자 체크 (매 6시간)
+    'check-inactive': {
+        'task': 'tasks.engagement_monitor.check_inactive_users',
+        'schedule': crontab(minute=0, hour='*/6'),
+    },
+}
+
+
+
 			
 ## 3. 시스템 아키텍처			
 			
@@ -225,7 +510,7 @@ Layer 4: Analytical Memory (TimescaleDB)
 ┌─────────────────────────────────────────────────────────┐			
  │ External Services │			
  ├─────────────────────────────────────────────────────────┤			
- │ Claude 3.5 │ GPT-4o │ Kakao API │ Email/SMS │			
+ │ Claude 4.5 │ GPT-4o │ Kakao API │ Email/SMS │			
  └─────────────────────────────────────────────────────────┘			
 			
 ### 3.2 기술 스택			
@@ -417,11 +702,12 @@ CREATE TABLE users (
     baseline_established_at TIMESTAMP,			
     created_at TIMESTAMP DEFAULT NOW(),			
     updated_at TIMESTAMP DEFAULT NOW(),			
-    deleted_at TIMESTAMP,			
-    			
-    INDEX idx_kakao_id (kakao_id),			
-    INDEX idx_created_at (created_at)			
+    deleted_at TIMESTAMP
 );			
+
+-- 인덱스 생성
+CREATE INDEX idx_users_kakao_id ON users(kakao_id);
+CREATE INDEX idx_users_created_at ON users(created_at);
 			
  -- conversations 테이블			
 CREATE TABLE conversations (			
@@ -433,11 +719,12 @@ CREATE TABLE conversations (
     image_url TEXT,			
     category VARCHAR(50),  -- reminiscence/daily_episodic/naming/...			
     response_latency_ms INTEGER,  -- 응답 지연 시간 (밀리초)			
-    created_at TIMESTAMP DEFAULT NOW(),			
+    created_at TIMESTAMP DEFAULT NOW()			
     			
-    INDEX idx_user_created (user_id, created_at),			
-    INDEX idx_category (category)			
 );			
+CREATE INDEX idx_conversations_user_created ON conversations(user_id, created_at);
+CREATE INDEX idx_conversations_category ON conversations(category);
+CREATE INDEX idx_conversations_created_desc ON conversations(created_at DESC);
 			
  -- analysis_results 테이블			
 CREATE TABLE analysis_results (			
@@ -471,13 +758,14 @@ CREATE TABLE analysis_results (
     -- 메타데이터			
     contradictions JSONB,  -- 모순 탐지 결과			
     confounds_detected JSONB,  -- 교란 변수 탐지			
-    created_at TIMESTAMP DEFAULT NOW(),			
+    created_at TIMESTAMP DEFAULT NOW()
     			
-    INDEX idx_user_created (user_id, created_at),			
-    INDEX idx_risk_level (risk_level),			
-    INDEX idx_mcdi_score (mcdi_score)			
 );			
 			
+CREATE INDEX idx_user_created ON analysis_results(user_id, created_at);
+CREATE INDEX idx_risk_level ON analysis_results(risk_level);
+CREATE INDEX idx_mcdi_score ON analysis_results(mcdi_score);
+
  -- guardians 테이블			
 CREATE TABLE guardians (			
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),			
@@ -485,11 +773,11 @@ CREATE TABLE guardians (
     phone VARCHAR(20),			
     email VARCHAR(100),			
     kakao_id VARCHAR(100),  -- 카카오톡 알림용			
-    created_at TIMESTAMP DEFAULT NOW(),			
+    created_at TIMESTAMP DEFAULT NOW()			
     			
-    INDEX idx_phone (phone),			
-    INDEX idx_email (email)			
 );			
+CREATE INDEX idx_phone ON guardians(phone);
+CREATE INDEX idx_email ON guardians(email);
 			
  -- user_guardians 테이블 (M:N 관계)			
 CREATE TABLE user_guardians (			
@@ -499,10 +787,10 @@ CREATE TABLE user_guardians (
     notification_enabled BOOLEAN DEFAULT TRUE,			
     created_at TIMESTAMP DEFAULT NOW(),			
     			
-    PRIMARY KEY (user_id, guardian_id),			
-    INDEX idx_user (user_id),			
-    INDEX idx_guardian (guardian_id)			
+    PRIMARY KEY (user_id, guardian_id)			
 );			
+CREATE INDEX idx_user ON user_guardians(user_id);
+CREATE INDEX idx_guardian ON user_guardians(guardian_id);			
 			
  -- notifications 테이블			
 CREATE TABLE notifications (			
@@ -515,11 +803,11 @@ CREATE TABLE notifications (
     risk_level VARCHAR(20),			
     analysis_snapshot JSONB,  -- 당시 분석 결과 스냅샷			
     sent_at TIMESTAMP DEFAULT NOW(),			
-    read_at TIMESTAMP,			
+    read_at TIMESTAMP
     			
-    INDEX idx_guardian_sent (guardian_id, sent_at),			
-    INDEX idx_user_sent (user_id, sent_at)			
 );			
+CREATE INDEX idx_guardian_sent ON notifications(guardian_id, sent_at);
+CREATE INDEX idx_user_sent ON notifications(user_id, sent_at);
 			
  -- memory_events 테이블 (모순 탐지 이력)			
 CREATE TABLE memory_events (			
@@ -532,11 +820,11 @@ CREATE TABLE memory_events (
     severity VARCHAR(20),  -- high/medium/low			
     confidence FLOAT,			
     conversation_id BIGINT REFERENCES conversations(id),			
-    created_at TIMESTAMP DEFAULT NOW(),			
+    created_at TIMESTAMP DEFAULT NOW()			
     			
-    INDEX idx_user_type (user_id, event_type),			
-    INDEX idx_severity (severity)			
 );			
+CREATE INDEX idx_user_type ON memory_events(user_id, event_type);
+CREATE INDEX idx_severity ON memory_events(severity);
 			
  -- garden_status 테이블 (게이미피케이션)			
 CREATE TABLE garden_status (			
@@ -1004,6 +1292,46 @@ Response (200 OK):
       }			
     ]			
   }			
+
+#### 5.3.6 이미지 분석
+
+POST /api/v1/vision/analyze
+
+**Description:** 음식 사진 분석
+
+**Request Body:**
+```json
+{
+  "user_id": "550e8400-e29b-41d4-a716-446655440000",
+  "image_url": "https://storage.memory-garden.ai/images/user123_20250115.jpg",
+  "context": "lunch"  // lunch/dinner/snack
+}
+
+Response (200 OK):
+
+{
+  "detected_items": [
+    {
+      "name": "된장찌개",
+      "confidence": 0.92,
+      "category": "soup"
+    },
+    {
+      "name": "김치",
+      "confidence": 0.88,
+      "category": "side_dish"
+    },
+    {
+      "name": "흰쌀밥",
+      "confidence": 0.95,
+      "category": "staple"
+    }
+  ],
+  "meal_summary": "된장찌개 정식",
+  "nutritional_balance": "good",  // good/fair/poor
+  "follow_up_question": "된장찌개에 어떤 재료가 들어갔어요?"
+}
+
 			
 5.4 에러 코드			
 400 Bad Request:			
@@ -1271,7 +1599,7 @@ QDRANT_API_KEY=your_qdrant_api_key
 # AI Services			
 CLAUDE_API_KEY=sk-ant-api03-...			
 OPENAI_API_KEY=sk-...			
-CLAUDE_MODEL=claude-3-5-sonnet-20241022			
+CLAUDE_MODEL=claude-4-5-sonnet-20250929			
 GPT_MODEL=gpt-4o-2024-08-06			
 			
 # Kakao			
@@ -1595,6 +1923,226 @@ jobs:
         echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin			
         docker push memory-garden:${{ github.sha }}			
 			
+```markdown
+### 9.1 테스트 환경 설정
+
+**tests/conftest.py** (모든 테스트에서 공유되는 Fixtures)
+
+```python
+"""
+공통 테스트 fixtures
+
+pytest가 자동으로 로드하는 설정 파일.
+모든 테스트에서 사용 가능한 fixture를 정의.
+"""
+
+import pytest
+import asyncio
+from typing import Generator
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from fastapi.testclient import TestClient
+import redis
+from qdrant_client import QdrantClient
+
+from api.main import app
+from database.postgres import Base
+from models.user import User
+from models.conversation import Conversation
+from config.settings import settings
+
+# ============================================
+# 1. 이벤트 루프 설정
+# ============================================
+@pytest.fixture(scope="session")
+def event_loop():
+    """이벤트 루프 fixture (session 단위)"""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+# ============================================
+# 2. 데이터베이스 Fixtures
+# ============================================
+TEST_DATABASE_URL = "postgresql://test_user:test_pass@localhost:5432/test_memory_garden"
+
+@pytest.fixture(scope="function")
+def test_db() -> Generator[Session, None, None]:
+    """테스트 DB 세션 (각 테스트마다 초기화)"""
+    # 테스트 DB 엔진 생성
+    engine = create_engine(TEST_DATABASE_URL)
+    
+    # 테이블 생성
+    Base.metadata.create_all(bind=engine)
+    
+    # 세션 생성
+    TestingSessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=engine
+    )
+    db = TestingSessionLocal()
+    
+    try:
+        yield db
+    finally:
+        db.close()
+        # 테스트 후 테이블 삭제
+        Base.metadata.drop_all(bind=engine)
+
+@pytest.fixture(scope="function")
+def test_user(test_db: Session) -> User:
+    """테스트용 사용자"""
+    user = User(
+        kakao_id="test_kakao_123",
+        name="테스트 사용자",
+        birth_date="1950-01-01",
+        gender="male",
+        baseline_mcdi=78.5,
+        baseline_established_at="2025-01-07"
+    )
+    test_db.add(user)
+    test_db.commit()
+    test_db.refresh(user)
+    
+    return user
+
+# ============================================
+# 3. Redis Fixtures
+# ============================================
+@pytest.fixture(scope="function")
+def test_redis() -> Generator[redis.Redis, None, None]:
+    """테스트용 Redis 클라이언트 (DB 15 사용)"""
+    client = redis.Redis(
+        host='localhost',
+        port=6379,
+        db=15,  # 테스트 전용 DB
+        decode_responses=True
+    )
+    
+    yield client
+    
+    # 테스트 후 정리
+    client.flushdb()
+    client.close()
+
+# ============================================
+# 4. Qdrant Fixtures
+# ============================================
+@pytest.fixture(scope="function")
+def test_qdrant() -> Generator[QdrantClient, None, None]:
+    """테스트용 Qdrant 클라이언트"""
+    client = QdrantClient(url="http://localhost:6333")
+    
+    # 테스트 컬렉션 생성
+    test_collections = [
+        "test_episodic_memory",
+        "test_biographical_memory",
+        "test_question_history"
+    ]
+    
+    for collection in test_collections:
+        try:
+            client.create_collection(
+                collection_name=collection,
+                vectors_config={
+                    "size": 1536,
+                    "distance": "Cosine"
+                }
+            )
+        except Exception:
+            pass  # 이미 존재하면 무시
+    
+    yield client
+    
+    # 테스트 후 정리
+    for collection in test_collections:
+        try:
+            client.delete_collection(collection_name=collection)
+        except Exception:
+            pass
+
+# ============================================
+# 5. FastAPI 테스트 클라이언트
+# ============================================
+@pytest.fixture(scope="module")
+def client() -> TestClient:
+    """FastAPI 테스트 클라이언트"""
+    return TestClient(app)
+
+# ============================================
+# 6. Mock Fixtures
+# ============================================
+@pytest.fixture
+def mock_llm_response():
+    """LLM 응답 모킹 (고정값)"""
+    return {
+        "response": "안녕하세요! 오늘 기분이 어떠세요?",
+        "tokens_used": 50
+    }
+
+@pytest.fixture
+def sample_message():
+    """샘플 사용자 메시지"""
+    return "봄이면 우리 엄마가 꼭 쑥을 뜯으러 뒷산에 가셨어. 쑥떡을 만드셨지."
+
+@pytest.fixture
+def sample_context():
+    """샘플 ProcessingContext"""
+    from core.workflow.context import ProcessingContext
+    from datetime import datetime
+    
+    return ProcessingContext(
+        user_id="test_user_123",
+        message="안녕하세요",
+        timestamp=datetime.now()
+    )
+
+# ============================================
+# 7. 환경 변수 Mock
+# ============================================
+@pytest.fixture(scope="session", autouse=True)
+def set_test_env():
+    """테스트 환경 변수 설정"""
+    import os
+    os.environ["APP_ENV"] = "test"
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+    os.environ["REDIS_URL"] = "redis://localhost:6379/15"
+    os.environ["LOG_LEVEL"] = "DEBUG"
+
+# ============================================
+# 8. 파일 정리 Fixture
+# ============================================
+@pytest.fixture
+def temp_file(tmp_path):
+    """임시 파일 생성 (자동 정리)"""
+    file_path = tmp_path / "test_file.txt"
+    yield file_path
+    # 테스트 후 자동 정리 (tmp_path가 처리)
+
+사용 예시:
+# tests/test_core/test_analysis.py
+
+def test_with_db(test_db, test_user):
+    """DB fixture 사용"""
+    assert test_user.name == "테스트 사용자"
+    
+    # DB 조회
+    user = test_db.query(User).filter(User.id == test_user.id).first()
+    assert user is not None
+
+@pytest.mark.asyncio
+async def test_with_redis(test_redis):
+    """Redis fixture 사용"""
+    test_redis.set("test_key", "test_value")
+    assert test_redis.get("test_key") == "test_value"
+
+def test_api_with_client(client):
+    """FastAPI client fixture 사용"""
+    response = client.get("/health")
+    assert response.status_code == 200
+
+
 9. 테스트 전략			
 			
 9.1 테스트 피라미드			
@@ -1817,26 +2365,39 @@ async def delete_user_data(user_id: str, db: Session = Depends(get_db)):
     사용자 데이터 완전 삭제 (Right to be Forgotten)			
     			
     삭제 대상:			
-    - PostgreSQL: users, conversations, analysis_results			
-    - Qdrant: episodic_memory, biographical_memory			
-    - Redis: session 데이터			
-    - TimescaleDB: analysis_timeseries			
+    - PostgreSQL: users, conversations, analysis_results
+    - Qdrant: episodic_memory, biographical_memory, question_history
+    - Redis: session 데이터
+    - TimescaleDB: analysis_timeseries
     """			
     # 1. RDBMS 삭제 (CASCADE)			
     db.query(User).filter(User.id == user_id).delete()			
+    db.commit
     			
-    # 2. Vector DB 삭제			
-    qdrant_client.delete(			
-        collection_name="episodic_memory",			
-        points_selector={"filter": {"user_id": user_id}}			
-    )			
+    # 2. Vector DB 삭제 (3개 컬렉션)
+    collections = ["episodic_memory", "biographical_memory", "question_history"]
+    for collection in collections:
+        qdrant_client.delete(
+            collection_name=collection,
+            points_selector={
+                "filter": {
+                    "must": [
+                        {"key": "user_id", "match": {"value": user_id}}
+                    ]
+                }
+            }
+        )
     			
-    # 3. Redis 삭제			
-    redis_client.delete(f"session:{user_id}")			
-    redis_client.delete(f"garden:{user_id}")			
+    # 3. Redis 삭제
+    redis_client.delete(f"session:{user_id}")
+    redis_client.delete(f"garden:{user_id}")
+    redis_client.delete(f"confound_check:{user_id}")
     			
-    # 4. 로그 기록 (감사용)			
-    logger.info(f"User data deleted: {user_id}", extra={"gdpr": True})			
+    # 5. 로그 기록 (감사용)
+    logger.info(
+        f"User data deleted: {user_id}",
+        extra={"gdpr": True, "timestamp": datetime.now().isoformat()}
+    )
     			
     return {"message": "All user data has been permanently deleted"}			
 			
@@ -1858,7 +2419,7 @@ MEDICAL_DISCLAIMER = """
 질병의 예방, 진단, 치료를 목적으로 하지 않습니다.			
 """
 
-@router.get(/api/v1/users/{user_id}/analysis/report"")"			
+@router.get("/api/v1/users/{user_id}/analysis/report")			
 async def get_clinical_report(user_id: str):			
     """임상 리포트 생성 (의사 전달용)"""			
     report = generate_report(user_id)			

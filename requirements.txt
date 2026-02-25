@@ -1,47 +1,95 @@
+# ============================================
+# Memory Garden - Python Dependencies
+#
+# 치매 조기 감지 서비스
+# Python 3.11+ 필수
+#
+# 버전 정보 없음 = 최신 안정 버전 자동 설치
+# pip install --upgrade 권장
+# ============================================
+
+# ============================================
 # Web Framework
+# ============================================
 fastapi
 uvicorn[standard]
 pydantic
 pydantic-settings
 
-# Database
-sqlalchemy
+# ============================================
+# Database & Storage
+# ============================================
+# PostgreSQL (비동기)
+sqlalchemy[asyncio]
+asyncpg
 psycopg2-binary
 alembic
-redis
+
+# Redis (세션 캐싱)
+redis[hiredis]
+
+# Qdrant (벡터 DB)
 qdrant-client
 
-# AI/ML
+# ============================================
+# AI/ML Services
+# ============================================
 anthropic
 openai
 kiwipiepy
 numpy
 scikit-learn
 
-# Task Queue
-celery
+# ============================================
+# Data Analysis
+# ============================================
+pandas
+scipy
+python-dateutil
 
+# ============================================
 # Utilities
+# ============================================
 python-dotenv
 httpx
 aiohttp
 tenacity
 python-jose[cryptography]
 python-multipart
+email-validator
+bcrypt
 
+# ============================================
+# Push Notifications
+# ============================================
+firebase-admin  # FCM (Firebase Cloud Messaging)
+apscheduler     # 스케줄러 (일일 자동 발송)
+
+# ============================================
 # Logging & Monitoring
+# ============================================
 structlog
 sentry-sdk
 
+# ============================================
 # Testing
+# ============================================
 pytest
 pytest-asyncio
 pytest-cov
 pytest-mock
 faker
 
+# ============================================
 # Code Quality
+# ============================================
 black
 isort
 flake8
 mypy
+
+# ============================================
+# Type Stubs (mypy 타입 체킹용)
+# ============================================
+types-redis
+types-requests

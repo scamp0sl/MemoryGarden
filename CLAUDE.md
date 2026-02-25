@@ -15,6 +15,643 @@
 6. [AI 도구 활용 팁](#6-ai-도구-활용-팁)		
 		
 ---		
+---
+
+## 0. ?? 시작하기 전에
+
+### 0.1 개발 환경 요구사항
+
+```yaml
+필수 요구사항:
+  - Python: 3.11+
+  - Docker: 24.0+
+  - Docker Compose: 2.23+
+  - Git: 2.40+
+
+권장 도구:
+  - IDE: Cursor AI / VS Code
+  - Terminal: iTerm2 (macOS) / Windows Terminal
+  - API 테스트: Postman / HTTPie
+
+0.2 로컬 개발 환경 설정 (최초 1회)
+# ============================================
+# 1. 저장소 클론
+# ============================================
+git clone https://github.com/your-org/memory-garden.git
+cd memory-garden
+
+# ============================================
+# 2. Python 가상환경 생성
+# ============================================
+python3.11 -m venv venv
+
+# 활성화 (macOS/Linux)
+source venv/bin/activate
+
+# 활성화 (Windows)
+venv\Scripts\activate
+
+# ============================================
+# 3. 의존성 설치
+# ============================================
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 개발 도구 추가 설치
+pip install -r requirements-dev.txt
+
+# ============================================
+# 4. 환경 변수 설정
+# ============================================
+cp .env.example .env
+
+# .env 파일 편집 (필수!)
+# - CLAUDE_API_KEY: Anthropic API 키
+# - OPENAI_API_KEY: OpenAI API 키
+# - DATABASE_URL: PostgreSQL 연결 정보
+# - REDIS_URL: Redis 연결 정보
+
+# macOS/Linux
+nano .env
+
+# Windows
+notepad .env
+
+# ============================================
+# 5. Docker Compose로 DB 실행
+# ============================================
+docker-compose up -d postgres redis qdrant
+
+# 컨테이너 상태 확인
+docker-compose ps
+
+# 로그 확인 (문제 발생 시)
+docker-compose logs -f postgres
+
+# ============================================
+# 6. 데이터베이스 초기화
+# ============================================
+# 테이블 생성
+python scripts/init_db.py
+
+# 마이그레이션 실행 (Alembic)
+alembic upgrade head
+
+# 테스트 데이터 추가 (선택)
+python scripts/seed_data.py
+
+# ============================================
+# 7. 개발 서버 실행
+# ============================================
+# FastAPI 서버 (Hot Reload)
+uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+
+# ============================================
+# 8. API 문서 확인
+# ============================================
+# 브라우저에서 열기:
+# - Swagger UI: http://localhost:8000/docs
+# - ReDoc: http://localhost:8000/redoc
+
+# ============================================
+# 9. 헬스 체크
+# ============================================
+curl http://localhost:8000/health
+
+# 예상 응답:
+# {"status": "ok", "timestamp": "2025-01-15T10:00:00Z"}
+
+0.3 Cursor AI 설정
+# ============================================
+# 1. .cursorrules 파일 생성
+# ============================================
+# 프로젝트 루트에 생성
+touch .cursorrules
+
+# 아래 내용 복사 (이 문서의 2장 코딩 컨벤션 전체)
+
+# ============================================
+# 1. .cursorrules 파일 생성
+# ============================================
+# 프로젝트 루트에 생성
+touch .cursorrules
+
+# 아래 내용 복사 (이 문서의 2장 코딩 컨벤션 전체)
+
+.cursorrules 내용:
+# Memory Garden - Cursor AI Rules
+
+## Project Context
+- 치매 조기 감지 서비스 (카카오톡 기반)
+- 순수 Python (LangGraph 불사용)
+- 비동기 처리 (asyncio)
+
+## Coding Standards
+1. 타입 힌팅 필수
+2. Google Style Docstring
+3. 에러 처리 (try-except)
+4. 로깅 추가 (logger.info/error)
+5. async/await for I/O operations
+
+## File Structure
+- snake_case for files
+- PascalCase for classes
+- snake_case for functions
+
+## Testing
+- pytest + pytest-asyncio
+- 최소 80% 커버리지
+- AAA 패턴 (Arrange-Act-Assert)
+
+자세한 내용은 docs/CLAUDE.md 참조
+
+# ============================================
+# 2. Cursor 설정 확인
+# ============================================
+# Cursor에서 Cmd+, (설정 열기)
+# Rules for AI > .cursorrules 자동 인식 확인
+
+0.4 첫 번째 코드 작성 테스트
+# ============================================
+# 1. 간단한 테스트 실행
+# ============================================
+pytest tests/test_api/test_health.py -v
+
+# 예상 출력:
+# tests/test_api/test_health.py::test_health_check PASSED
+
+# ============================================
+# 2. 코드 포맷팅 테스트
+# ============================================
+black --check core/
+isort --check-only core/
+
+# ============================================
+# 3. 타입 체킹 테스트
+# ============================================
+mypy core/
+
+# ============================================
+# 4. Hello World API 작성
+# ============================================
+# api/routes/hello.py 생성 (Cursor에서)
+
+Cursor에서 Cmd+K 후:
+"api/routes/hello.py를 생성해줘.
+GET /api/v1/hello 엔드포인트 하나만.
+{'message': 'Hello, Memory Garden!'} 반환.
+.cursorrules 준수."
+
+# ============================================
+# 5. 작성한 API 테스트
+# ============================================
+# 서버 재시작 (자동 reload)
+curl http://localhost:8000/api/v1/hello
+
+# 예상 응답:
+# {"message": "Hello, Memory Garden!"}
+
+0.5 문제 해결 (Troubleshooting)
+# 문제 1: Docker 컨테이너가 시작 안 됨
+docker-compose down
+docker-compose up -d --force-recreate
+
+# 문제 2: 포트 충돌 (8000 포트 사용 중)
+# 다른 프로세스 확인
+lsof -i :8000  # macOS/Linux
+netstat -ano | findstr :8000  # Windows
+
+# 프로세스 종료 후 재시도
+
+# 문제 3: Python 가상환경 활성화 안 됨
+which python  # 가상환경 python인지 확인
+# 출력: /path/to/memory-garden/venv/bin/python (정상)
+
+# 문제 4: 의존성 설치 실패
+pip install --upgrade pip setuptools wheel
+pip install -r requirements.txt --no-cache-dir
+
+# 문제 5: DB 연결 실패
+# PostgreSQL 컨테이너 로그 확인
+docker-compose logs postgres
+
+# DB 접속 테스트
+docker-compose exec postgres psql -U memgarden -d memory_garden
+
+0.6 다음 단계
+설정이 완료되면 1. 프로젝트 이해부터 읽고 개발을 시작하세요!
+
+권장 순서:
+
+1장: 프로젝트 이해 (워크플로우 외우기)
+2장: 코딩 컨벤션 (스타일 익히기)
+3장: 핵심 파일 작성 (context.py → message_processor.py 순)
+4장: AI 프롬프트 활용
+
+---
+
+## ?? 우선순위 중간
+
+### 4. 개별 지표 파일 스켈레톤 추가
+
+**위치: 3장 파일별 개발 가이드 → analyzer.py 다음에 추가**
+
+```markdown
+---
+
+**5. 개별 분석 지표 (6개 파일)**
+
+다음 6개 파일은 각각 독립적인 분석 지표를 구현합니다.
+모두 동일한 인터페이스를 따라 Analyzer에서 병렬 실행됩니다.
+
+**공통 인터페이스:**
+```python
+from typing import Dict, Any
+from abc import ABC, abstractmethod
+
+class BaseMetricAnalyzer(ABC):
+    """모든 지표 분석기의 베이스 클래스"""
+    
+    @abstractmethod
+    async def analyze(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Args:
+            message: 사용자 응답 텍스트
+            context: 분석에 필요한 추가 정보
+        
+        Returns:
+            {
+                "score": float (0-100),
+                "components": dict,
+                "details": dict
+            }
+        """
+        pass
+5.1 core/analysis/lexical_richness.py
+"""
+어휘 풍부도 (LR) 분석기
+
+Fraser et al. (2016) 기반:
+- 대명사 대체율 증가 = 인지 저하 신호
+- Type-Token Ratio (TTR) 감소 = 어휘 빈약
+- 빈 발화 증가 = 단어 인출 장애
+"""
+
+from typing import Dict, Any, List
+from kiwipiepy import Kiwi
+import numpy as np
+
+from utils.logger import get_logger
+from utils.exceptions import AnalysisError
+
+logger = get_logger(__name__)
+
+class LexicalRichnessAnalyzer:
+    """어휘 풍부도 분석"""
+    
+    def __init__(self):
+        self.kiwi = Kiwi()
+        
+        # 빈 발화 패턴
+        self.empty_speech_patterns = [
+            "그거", "저거", "뭐더라", "있잖아", "그게", 
+            "어", "음", "그", "저"
+        ]
+    
+    async def analyze(
+        self, 
+        message: str,
+        context: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
+        """
+        어휘 풍부도 분석
+        
+        Returns:
+            {
+                "score": 78.5,
+                "components": {
+                    "pronoun_ratio": 0.15,
+                    "mattr": 0.72,
+                    "concreteness": 0.85,
+                    "empty_speech_ratio": 0.05
+                },
+                "details": {
+                    "total_tokens": 42,
+                    "unique_tokens": 30,
+                    "pronouns": ["그거", "저거"],
+                    "concrete_nouns": ["쑥", "뒷산", "엄마"]
+                }
+            }
+        """
+        try:
+            # 형태소 분석
+            tokens = self._tokenize(message)
+            
+            # 4개 하위 지표 계산
+            pronoun_ratio = self._calculate_pronoun_ratio(tokens)
+            mattr = self._calculate_mattr(tokens)
+            concreteness = self._calculate_concreteness(tokens)
+            empty_speech_ratio = self._calculate_empty_speech(message)
+            
+            # 종합 점수 (4개 평균, 역방향 지표는 반전)
+            score = (
+                (1 - pronoun_ratio) * 25 +  # 낮을수록 좋음
+                mattr * 100 * 0.25 +
+                concreteness * 100 * 0.25 +
+                (1 - empty_speech_ratio) * 25
+            )
+            
+            return {
+                "score": round(score, 2),
+                "components": {
+                    "pronoun_ratio": round(pronoun_ratio, 3),
+                    "mattr": round(mattr, 3),
+                    "concreteness": round(concreteness, 3),
+                    "empty_speech_ratio": round(empty_speech_ratio, 3)
+                },
+                "details": {
+                    "total_tokens": len(tokens),
+                    "unique_tokens": len(set(t['form'] for t in tokens)),
+                    "pronouns": self._extract_pronouns(tokens),
+                    "concrete_nouns": self._extract_concrete_nouns(tokens)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Lexical Richness analysis failed: {e}", exc_info=True)
+            raise AnalysisError(f"LR analysis failed: {e}") from e
+    
+    def _tokenize(self, text: str) -> List[Dict]:
+        """Kiwi 형태소 분석"""
+        result = self.kiwi.analyze(text)
+        tokens = []
+        for token, pos, _, _ in result[0][0]:
+            tokens.append({"form": token, "pos": pos})
+        return tokens
+    
+    def _calculate_pronoun_ratio(self, tokens: List[Dict]) -> float:
+        """대명사 비율 = 대명사 / (대명사 + 명사)"""
+        pronouns = [t for t in tokens if t['pos'] == 'NP']  # 대명사
+        nouns = [t for t in tokens if t['pos'].startswith('N')]  # 명사류
+        
+        if not nouns:
+            return 0.0
+        
+        return len(pronouns) / len(nouns)
+    
+    def _calculate_mattr(self, tokens: List[Dict], window: int = 20) -> float:
+        """Moving Average TTR"""
+        if len(tokens) < window:
+            # 짧은 문장은 일반 TTR
+            forms = [t['form'] for t in tokens]
+            return len(set(forms)) / len(forms) if forms else 0.0
+        
+        ttrs = []
+        for i in range(len(tokens) - window + 1):
+            window_tokens = [tokens[j]['form'] for j in range(i, i + window)]
+            ttr = len(set(window_tokens)) / window
+            ttrs.append(ttr)
+        
+        return np.mean(ttrs)
+    
+    def _calculate_concreteness(self, tokens: List[Dict]) -> float:
+        """구체 명사 비율"""
+        # 간단 구현: 일반명사(NNG) vs 고유명사(NNP)
+        nouns = [t for t in tokens if t['pos'].startswith('NN')]
+        concrete = [t for t in nouns if t['pos'] == 'NNG']
+        
+        if not nouns:
+            return 0.5  # 중립
+        
+        return len(concrete) / len(nouns)
+    
+    def _calculate_empty_speech(self, text: str) -> float:
+        """빈 발화 비율"""
+        words = text.split()
+        if not words:
+            return 0.0
+        
+        empty_count = sum(
+            1 for word in words 
+            if any(pattern in word for pattern in self.empty_speech_patterns)
+        )
+        
+        return empty_count / len(words)
+    
+    def _extract_pronouns(self, tokens: List[Dict]) -> List[str]:
+        """대명사 추출"""
+        return [t['form'] for t in tokens if t['pos'] == 'NP']
+    
+    def _extract_concrete_nouns(self, tokens: List[Dict]) -> List[str]:
+        """구체 명사 추출"""
+        return [t['form'] for t in tokens if t['pos'] == 'NNG'][:5]  # 최대 5개
+
+AI에게 요청 시:
+"core/analysis/lexical_richness.py를 위 구조대로 완성해줘.
+주석으로 각 지표의 수식도 명시해줘."
+
+5.2 core/analysis/semantic_drift.py
+"""
+의미적 표류 (SD) 분석기
+
+질문-응답 관련도 저하 = 주의력/집행기능 저하
+"""
+
+from typing import Dict, Any
+import numpy as np
+
+from services.llm_service import LLMService
+from core.nlp.embedder import Embedder
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+class SemanticDriftAnalyzer:
+    """의미적 표류 분석"""
+    
+    def __init__(self, llm_service: LLMService, embedder: Embedder):
+        self.llm = llm_service
+        self.embedder = embedder
+    
+    async def analyze(
+        self,
+        message: str,
+        context: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
+        """
+        의미적 표류 분석
+        
+        context:
+            - question: 원래 질문
+            - previous_messages: 이전 대화들
+        
+        Returns:
+            {
+                "score": 82.3,
+                "components": {
+                    "relevance": 0.75,
+                    "coherence": 0.82,
+                    "topic_drift": 0,
+                    "logical_flow": 4
+                }
+            }
+        """
+        question = context.get("question", "") if context else ""
+        
+        # 1. 질문-응답 관련도 (Embedding Cosine Similarity)
+        relevance = await self._calculate_relevance(question, message)
+        
+        # 2. 문장 간 응집도
+        coherence = await self._calculate_coherence(message)
+        
+        # 3. 주제 이탈 탐지 (LLM Judge)
+        topic_drift = await self._detect_topic_drift(question, message)
+        
+        # 4. 논리성 평가 (LLM Judge 1-5점)
+        logical_flow = await self._evaluate_logic(message)
+        
+        # 종합 점수
+        score = (
+            relevance * 100 * 0.35 +
+            coherence * 100 * 0.30 +
+            (1 - topic_drift) * 100 * 0.15 +
+            logical_flow * 20 * 0.20
+        )
+        
+        return {
+            "score": round(score, 2),
+            "components": {
+                "relevance": round(relevance, 3),
+                "coherence": round(coherence, 3),
+                "topic_drift": int(topic_drift),
+                "logical_flow": logical_flow
+            }
+        }
+    
+    async def _calculate_relevance(self, question: str, answer: str) -> float:
+        """질문-응답 cosine similarity"""
+        if not question:
+            return 1.0  # 질문이 없으면 중립
+        
+        q_vec = await self.embedder.embed(question)
+        a_vec = await self.embedder.embed(answer)
+        
+        similarity = np.dot(q_vec, a_vec) / (
+            np.linalg.norm(q_vec) * np.linalg.norm(a_vec)
+        )
+        
+        # 0.5~1.0 범위로 정규화
+        normalized = max(0, (similarity + 1) / 2)
+        return normalized
+    
+    async def _calculate_coherence(self, text: str) -> float:
+        """문장 간 응집도"""
+        sentences = text.split('.')
+        if len(sentences) < 2:
+            return 1.0
+        
+        # 각 문장 임베딩 후 인접 문장 유사도
+        embeddings = [await self.embedder.embed(s.strip()) for s in sentences if s.strip()]
+        
+        similarities = []
+        for i in range(len(embeddings) - 1):
+            sim = np.dot(embeddings[i], embeddings[i+1]) / (
+                np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[i+1])
+            )
+            similarities.append(sim)
+        
+        return np.mean(similarities) if similarities else 1.0
+    
+    async def _detect_topic_drift(self, question: str, answer: str) -> int:
+        """주제 이탈 탐지 (0: 정상, 1: 이탈)"""
+        if not question:
+            return 0
+        
+        prompt = f"""
+다음 질문과 답변의 관련성을 평가하세요.
+
+질문: {question}
+답변: {answer}
+
+답변이 질문과 관련이 있으면 0, 주제를 완전히 벗어났으면 1을 출력하세요.
+숫자만 출력하세요.
+"""
+        
+        result = await self.llm.call(prompt, max_tokens=5)
+        try:
+            return int(result.strip())
+        except:
+            return 0
+    
+    async def _evaluate_logic(self, text: str) -> int:
+        """논리성 평가 (1-5점)"""
+        prompt = f"""
+다음 텍스트의 논리성을 1-5점으로 평가하세요.
+
+텍스트: {text}
+
+평가 기준:
+5점: 논리적 흐름이 명확, 인과관계 뚜렷
+4점: 대체로 논리적
+3점: 보통
+2점: 다소 비논리적, 비약이 있음
+1점: 논리 없음, 횡설수설
+
+숫자만 출력하세요.
+"""
+        
+        result = await self.llm.call(prompt, max_tokens=5)
+        try:
+            score = int(result.strip())
+            return max(1, min(5, score))  # 1-5 범위 강제
+        except:
+            return 3  # 실패 시 중립
+
+5.3 나머지 4개 지표 파일 (간략 버전)
+# core/analysis/narrative_coherence.py
+"""서사 일관성 (NC) - 5W1H 포함도, 시간 순서, 반복성"""
+class NarrativeCoherenceAnalyzer:
+    async def analyze(self, message: str, context: Dict = None) -> Dict:
+        # TODO: 구현
+        pass
+
+# core/analysis/temporal_orientation.py
+"""시간적 지남력 (TO) - 요일/날짜 정확도, 계절 적합성"""
+class TemporalOrientationAnalyzer:
+    async def analyze(self, message: str, context: Dict = None) -> Dict:
+        # TODO: 구현
+        pass
+
+# core/analysis/episodic_recall.py
+"""일화 기억 (ER) - 자유 회상 정확도, 단서 재인, 모순 탐지"""
+class EpisodicRecallAnalyzer:
+    async def analyze(self, message: str, context: Dict = None) -> Dict:
+        # TODO: 구현
+        pass
+
+# core/analysis/response_time.py
+"""반응 시간 (RT) - 메시지 지연 시간, 효율성"""
+class ResponseTimeAnalyzer:
+    async def analyze(self, message: str, context: Dict = None) -> Dict:
+        # TODO: 구현
+        pass
+
+AI에게 순차 요청:
+"core/analysis/narrative_coherence.py를 완성해줘.
+lexical_richness.py와 같은 구조로."
+
+"core/analysis/temporal_orientation.py를 완성해줘.
+현재 날짜/요일 확인, 계절 적합성 판단 포함."
+
+"core/analysis/episodic_recall.py를 완성해줘.
+context['episodic']에서 과거 기록 비교."
+
+"core/analysis/response_time.py를 완성해줘.
+context['response_latency']에서 지연 시간 추출."
+
+
+
+
 		
 ## 1. 프로젝트 이해		
 		
@@ -49,6 +686,17 @@ Memory Garden = 치매 조기 감지 서비스
 ?? 워크플로우 (외워두기!)		
 """
 핵심 플로우 (이 순서를 항상 기억!)
+
+MCDI 종합 점수 계산:
+MCDI = w₁·LR + w₂·SD + w₃·NC + w₄·TO + w5·ER + w6·RT
+
+가중치:
+- w₁ = 0.20 (LR: Lexical Richness - 어휘 풍부도)
+- w₂ = 0.20 (SD: Semantic Drift - 의미적 표류)
+- w₃ = 0.15 (NC: Narrative Coherence - 서사 일관성)
+- w₄ = 0.15 (TO: Temporal Orientation - 시간적 지남력)
+- w5 = 0.20 (ER: Episodic Recall - 일화 기억)
+- w6 = 0.10 (RT: Response Time - 반응 시간)
 """		
 		
 async def process_message(user_id, message):		
@@ -976,6 +1624,221 @@ AI에게 요청 시:
 "core/analysis/analyzer.py를 위 구조대로 작성해줘.
 만약 3개 이상 지표가 실패하면 MCDI 신뢰도를 낮게 표시하는 로직도 추가해줘."		
 		
+---
+
+**4. core/analysis/mcdi_calculator.py**
+
+"""
+MCDI 종합 점수 계산기
+
+6개 지표를 가중 평균하여 0-100 사이의 종합 점수 산출.
+일부 지표 실패 시 자동으로 가중치 재정규화.
+"""
+
+from typing import Dict
+from utils.logger import get_logger
+from utils.exceptions import MCDICalculationError
+
+logger = get_logger(__name__)
+
+class MCDICalculator:
+    """MCDI 종합 점수 계산
+    
+    Fraser et al. (2016) 기반 디지털 바이오마커 점수.
+    6개 지표를 가중 평균하여 최종 인지 기능 점수 산출.
+    """
+    
+    # ============================================
+    # 가중치 (SPEC.md 2.1.2 참조)
+    # ============================================
+    WEIGHTS = {
+        "LR": 0.20,  # Lexical Richness
+        "SD": 0.20,  # Semantic Drift
+        "NC": 0.15,  # Narrative Coherence
+        "TO": 0.15,  # Temporal Orientation
+        "ER": 0.20,  # Episodic Recall
+        "RT": 0.10   # Response Time
+    }
+    
+    # 최소 유효 지표 개수
+    MIN_VALID_METRICS = 3
+    
+    def calculate(self, scores: Dict[str, float]) -> float:
+        """
+        6개 지표를 가중 평균하여 MCDI 계산
+        
+        Args:
+            scores: {"LR": 78.5, "SD": 82.3, ...}
+                    (None 값은 이미 제거된 상태)
+        
+        Returns:
+            0-100 사이의 MCDI 점수
+            
+        Raises:
+            MCDICalculationError: 유효 지표가 3개 미만일 때
+            
+        Example:
+            >>> calculator = MCDICalculator()
+            >>> scores = {"LR": 78.5, "SD": 82.3, "NC": 75.0, 
+            ...           "TO": 80.0, "ER": 72.5, "RT": 70.0}
+            >>> mcdi = calculator.calculate(scores)
+            >>> print(mcdi)
+            76.88
+        """
+        if not scores:
+            raise MCDICalculationError("No valid scores provided")
+        
+        # 유효 지표 개수 확인
+        if len(scores) < self.MIN_VALID_METRICS:
+            raise MCDICalculationError(
+                f"At least {self.MIN_VALID_METRICS} metrics required, "
+                f"got {len(scores)}: {list(scores.keys())}"
+            )
+        
+        # 유효한 지표만 가중치 추출
+        valid_weights = {k: self.WEIGHTS[k] for k in scores.keys()}
+        weight_sum = sum(valid_weights.values())
+        
+        # 가중치 재정규화 (합이 1.0이 되도록)
+        normalized_weights = {
+            k: v / weight_sum 
+            for k, v in valid_weights.items()
+        }
+        
+        # 가중 평균 계산
+        mcdi = sum(
+            scores[k] * normalized_weights[k] 
+            for k in scores.keys()
+        )
+        
+        # 신뢰도 계산 (6개 중 몇 개 사용했는가)
+        reliability = len(scores) / len(self.WEIGHTS)
+        
+        logger.info(
+            f"MCDI calculated: {mcdi:.2f}",
+            extra={
+                "used_metrics": list(scores.keys()),
+                "reliability": f"{reliability:.2%}",
+                "normalized_weights": normalized_weights
+            }
+        )
+        
+        return round(mcdi, 2)
+    
+    def calculate_with_confidence(
+        self, 
+        scores: Dict[str, float]
+    ) -> Dict[str, float]:
+        """
+        MCDI 점수 + 신뢰도 함께 반환
+        
+        Returns:
+            {
+                "mcdi_score": 76.88,
+                "reliability": 1.0,  # 6/6 지표 사용
+                "used_metrics": ["LR", "SD", ...],
+                "missing_metrics": []
+            }
+        """
+        mcdi_score = self.calculate(scores)
+        
+        all_metrics = set(self.WEIGHTS.keys())
+        used_metrics = set(scores.keys())
+        missing_metrics = all_metrics - used_metrics
+        
+        return {
+            "mcdi_score": mcdi_score,
+            "reliability": len(used_metrics) / len(all_metrics),
+            "used_metrics": sorted(used_metrics),
+            "missing_metrics": sorted(missing_metrics)
+        }
+
+
+# ============================================
+# 테스트 코드 예시
+# ============================================
+"""
+# tests/test_core/test_mcdi_calculator.py
+
+import pytest
+from core.analysis.mcdi_calculator import MCDICalculator
+from utils.exceptions import MCDICalculationError
+
+@pytest.fixture
+def calculator():
+    return MCDICalculator()
+
+def test_calculate_all_metrics(calculator):
+    \"\"\"정상 케이스: 6개 지표 모두 있음\"\"\"
+    scores = {
+        "LR": 80.0,
+        "SD": 85.0,
+        "NC": 75.0,
+        "TO": 82.0,
+        "ER": 78.0,
+        "RT": 70.0
+    }
+    
+    mcdi = calculator.calculate(scores)
+    
+    # 가중 평균 검증
+    expected = (
+        80.0 * 0.20 +  # LR
+        85.0 * 0.20 +  # SD
+        75.0 * 0.15 +  # NC
+        82.0 * 0.15 +  # TO
+        78.0 * 0.20 +  # ER
+        70.0 * 0.10    # RT
+    )
+    
+    assert mcdi == pytest.approx(expected, rel=0.01)
+    assert 0 <= mcdi <= 100
+
+def test_calculate_partial_metrics(calculator):
+    \"\"\"일부 지표만 있을 때 (3개)\"\"\"
+    scores = {
+        "LR": 80.0,
+        "SD": 85.0,
+        "NC": 75.0
+    }
+    
+    # 가중치 재정규화 후 계산
+    # 원래 합: 0.20 + 0.20 + 0.15 = 0.55
+    # 정규화: LR=0.364, SD=0.364, NC=0.273
+    
+    mcdi = calculator.calculate(scores)
+    expected = 80.0 * (0.20/0.55) + 85.0 * (0.20/0.55) + 75.0 * (0.15/0.55)
+    
+    assert mcdi == pytest.approx(expected, rel=0.01)
+
+def test_calculate_insufficient_metrics(calculator):
+    \"\"\"에러 케이스: 2개만 있음 (최소 3개 필요)\"\"\"
+    scores = {"LR": 80.0, "SD": 85.0}
+    
+    with pytest.raises(MCDICalculationError, match="At least 3 metrics"):
+        calculator.calculate(scores)
+
+def test_calculate_empty_scores(calculator):
+    \"\"\"엣지 케이스: 빈 딕셔너리\"\"\"
+    with pytest.raises(MCDICalculationError, match="No valid scores"):
+        calculator.calculate({})
+
+def test_calculate_with_confidence(calculator):
+    \"\"\"신뢰도 포함 반환\"\"\"
+    scores = {"LR": 80.0, "SD": 85.0, "NC": 75.0, "TO": 82.0}
+    
+    result = calculator.calculate_with_confidence(scores)
+    
+    assert "mcdi_score" in result
+    assert result["reliability"] == 4 / 6  # 4개 / 6개
+    assert len(result["used_metrics"]) == 4
+    assert len(result["missing_metrics"]) == 2
+"""
+
+**AI에게 요청 시:**
+"core/analysis/mcdi_calculator.py를 위 구조대로 작성해줘.
+테스트 코드도 함께 생성해줘."
+
 		
 4. 프롬프트 템플릿		
 		

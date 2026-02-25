@@ -636,7 +636,9 @@ MCDI 점수: {variables.get('mcdi_score', 'N/A')}점
     async def send_to_me(
         self,
         access_token: str,
-        message: str
+        message: str,
+        link_url: Optional[str] = None,
+        button_title: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         나에게 보내기 (OAuth 버전)
@@ -644,6 +646,8 @@ MCDI 점수: {variables.get('mcdi_score', 'N/A')}점
         Args:
             access_token: 사용자의 카카오 액세스 토큰
             message: 전송할 메시지
+            link_url: 버튼 클릭 시 이동할 URL (없으면 채널 기본 URL)
+            button_title: 버튼 텍스트 (없으면 "채널에서 답하기 🌱")
 
         Returns:
             전송 결과
@@ -667,18 +671,19 @@ MCDI 점수: {variables.get('mcdi_score', 'N/A')}점
             }
 
         # 버튼 URL: 반드시 카카오 앱에 등록된 도메인이어야 허용됨
-        # 우리 서버(/kakao/channel)를 경유해 pf.kakao.com/채널ID/chat으로 리다이렉트
+        # 우리 서버(/kakao/channel*)를 경유해 pf.kakao.com/채널ID/chat으로 리다이렉트
         import json
-        channel_redirect_url = "https://n8n.softline.co.kr/kakao/channel"
+        effective_link_url = link_url or "https://n8n.softline.co.kr/kakao/channel"
+        effective_button_title = button_title or "채널에서 답하기 🌱"
 
         template_object = {
             "object_type": "text",
             "text": message,
             "link": {
-                "web_url": channel_redirect_url,
-                "mobile_web_url": channel_redirect_url
+                "web_url": effective_link_url,
+                "mobile_web_url": effective_link_url
             },
-            "button_title": "채널에서 답하기 🌱"
+            "button_title": effective_button_title
         }
 
         try:

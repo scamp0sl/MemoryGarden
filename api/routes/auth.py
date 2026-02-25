@@ -144,6 +144,40 @@ async def kakao_callback(
 
         logger.info(f"User tokens saved: {kakao_id}")
 
+        # ── 채널 연동 링크 발송 ──────────────────────────────
+        # OAuth 로그인 직후, 사용자 내 메시지로 "채널 연동하기" 버튼 전송.
+        # 버튼 클릭 → /kakao/channel-auth/{token} → 채널 입장 → 첫 메시지 시 자동 연동.
+        try:
+            import secrets
+            from database.redis_client import redis_client as _redis_client
+            from services.kakao_client import KakaoClient
+
+            link_token = secrets.token_urlsafe(16)
+            await _redis_client.set(
+                f"channel_link_token:{link_token}",
+                str(user.id),
+                ttl=1800  # 30분 유효
+            )
+
+            link_url = f"https://n8n.softline.co.kr/kakao/channel-auth/{link_token}"
+            link_message = (
+                f"안녕하세요, {nickname}님! 기억의 정원 🌱\n\n"
+                "매일 자연스러운 대화로 정원을 함께 가꿔봐요.\n\n"
+                "아래 버튼을 눌러 채널에 입장하신 후\n"
+                "메시지를 보내주시면 연동이 완료됩니다!"
+            )
+
+            kakao = KakaoClient()
+            await kakao.send_to_me(
+                access_token=access_token,
+                message=link_message,
+                link_url=link_url,
+                button_title="채널 연동하기 🌱"
+            )
+            logger.info(f"채널 연동 링크 발송 완료: {kakao_id}")
+        except Exception as e:
+            logger.warning(f"채널 연동 링크 발송 실패 (계속 진행): {e}")
+
         # 2-4. 자동 스케줄 등록
         from core.dialogue.scheduler import get_scheduler
         from datetime import time

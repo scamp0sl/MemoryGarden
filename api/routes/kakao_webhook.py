@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from database.postgres import get_db, AsyncSessionLocal
 from database.models import User, Conversation, AnalysisResult
+from database.redis_client import redis_client
 from core.dialogue.dialogue_manager import DialogueManager
 from core.analysis.analyzer import Analyzer
 from services.llm_service import LLMService
@@ -55,10 +56,10 @@ async def _get_or_create_user(
     plus_friend_user_key: str,
     bot_user_key: str
 ) -> tuple:
-    """plusfriendUserKey로 사용자 조회, 없으면 신규 생성
+    """plusfriendUserKey로 사용자 조회, 없으면 OAuth 계정 연동 시도 또는 신규 생성
 
     Returns:
-        (user, is_new): 사용자 객체와 신규 여부
+        (user, is_new, just_linked): 사용자 객체, 신규 여부, 방금 연동 여부
     """
     result = await db.execute(
         select(User).where(User.kakao_channel_user_key == plus_friend_user_key)
@@ -66,8 +67,49 @@ async def _get_or_create_user(
     user = result.scalar_one_or_none()
 
     if user:
-        return user, False
+        return user, False, False
 
+    # ── OAuth 계정 자동 연동 체크 ─────────────────────────
+    # /kakao/channel-auth/{token} 클릭 후 채널 메시지를 보낸 경우
+    # Redis에 channel_auth_pending:{user_id} 가 있으면 해당 OAuth 계정에 연동
+    try:
+        from uuid import UUID
+        pending_keys = await redis_client.keys("channel_auth_pending:*")
+
+        for pending_key in pending_keys:
+            oauth_user_id = pending_key.replace("channel_auth_pending:", "")
+            try:
+                result = await db.execute(
+                    select(User).where(User.id == UUID(oauth_user_id))
+                )
+                oauth_user = result.scalar_one_or_none()
+
+                if oauth_user and not oauth_user.kakao_channel_user_key:
+                    # 연동 실행
+                    oauth_user.kakao_channel_user_key = plus_friend_user_key
+                    await db.commit()
+                    await db.refresh(oauth_user)
+
+                    # pending 키 삭제 (일회용)
+                    await redis_client.delete(pending_key)
+
+                    logger.info(
+                        "채널 계정 연동 완료",
+                        extra={
+                            "oauth_user_id": oauth_user_id,
+                            "plus_friend_user_key": plus_friend_user_key
+                        }
+                    )
+                    return oauth_user, False, True  # just_linked=True
+
+            except Exception as e:
+                logger.warning(f"연동 시도 실패 (키: {pending_key}): {e}")
+                continue
+
+    except Exception as e:
+        logger.warning(f"채널 연동 체크 실패 (무시): {e}")
+
+    # 신규 채널 사용자 생성
     user = User(
         kakao_id=f"ch_{plus_friend_user_key}",
         name="정원 친구",
@@ -78,7 +120,7 @@ async def _get_or_create_user(
     await db.refresh(user)
 
     logger.info(f"신규 채널 사용자 생성: {plus_friend_user_key}")
-    return user, True
+    return user, True, False
 
 
 # ── 신규 사용자 스케줄 등록 ──────────────────────────
@@ -224,8 +266,17 @@ async def kakao_webhook(
             return _build_kakao_response("메시지를 입력해 주세요. 🌱")
 
         # ── 2. 사용자 조회/생성 ───────────────────────
-        user, is_new_user = await _get_or_create_user(db, plus_friend_user_key, bot_user_key)
+        user, is_new_user, just_linked = await _get_or_create_user(db, plus_friend_user_key, bot_user_key)
         user_id = str(user.id)
+
+        # 방금 OAuth ↔ 채널 연동 완료 → 환영 메시지 반환
+        if just_linked:
+            logger.info(f"채널 연동 완료 환영 메시지 전송: {user_id}")
+            return _build_kakao_response(
+                "채널 연동이 완료됐어요! 🌱\n\n"
+                "이제 매일 함께 기억의 정원을 가꿔봐요.\n"
+                "잠시 후 첫 대화가 시작됩니다! 😊"
+            )
 
         # 신규 사용자 → 스케줄 자동 등록
         if is_new_user:
@@ -297,6 +348,37 @@ async def kakao_channel_redirect():
         redirect_url = "https://pf.kakao.com"
     logger.info(f"채널 리다이렉트: {redirect_url}")
     return RedirectResponse(url=redirect_url, status_code=302)
+
+
+@router.get("/channel-auth/{token}")
+async def kakao_channel_auth(token: str):
+    """OAuth ↔ 채널 자동 연동 리다이렉트
+
+    플로우:
+    1. OAuth 로그인 완료 → send_to_me로 "채널 연동하기" 버튼 포함 메시지 전송
+    2. 사용자가 버튼 클릭 → 이 엔드포인트 호출
+    3. Redis에서 토큰으로 OAuth user_id 조회
+    4. channel_auth_pending:{user_id} 저장 (5분 TTL)
+    5. 카카오 채널로 리다이렉트
+    6. 사용자가 채널에서 첫 메시지 전송 → 웹훅에서 자동 연동
+    """
+    channel_id = settings.KAKAO_CHANNEL_ID
+    channel_url = f"https://pf.kakao.com/{channel_id}/chat" if channel_id else "https://pf.kakao.com"
+
+    # 토큰으로 OAuth user_id 조회
+    user_id = await redis_client.get(f"channel_link_token:{token}")
+    if not user_id:
+        logger.warning(f"유효하지 않거나 만료된 연동 토큰: {token[:10]}...")
+        return RedirectResponse(url=channel_url, status_code=302)
+
+    # pending 상태 저장 (5분 TTL - 채널에서 첫 메시지를 보낼 시간)
+    await redis_client.set(f"channel_auth_pending:{user_id}", "1", ttl=300)
+
+    # 링크 토큰 삭제 (일회용)
+    await redis_client.delete(f"channel_link_token:{token}")
+
+    logger.info(f"채널 연동 대기 설정 완료: user_id={user_id}")
+    return RedirectResponse(url=channel_url, status_code=302)
 
 
 @router.get("/webhook/test")

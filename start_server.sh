@@ -6,9 +6,9 @@ sleep 2
 nohup .venv/bin/uvicorn api.main:app \
     --reload \
     --host 127.0.0.1 \
-    --port 8001 \
+    --port 8002 \
     --log-level info \
-    > logs/fastapi.log 2>&1 &
+    >> logs/fastapi.log 2>&1 &
 
 echo "FastAPI 서버 시작 (HTTP 모드, Nginx 프록시용)"
 echo "PID: $!"

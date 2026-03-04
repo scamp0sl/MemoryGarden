@@ -20,6 +20,7 @@ from database.redis_client import redis_client
 from core.dialogue.dialogue_manager import DialogueManager
 from core.analysis.analyzer import Analyzer
 from services.llm_service import LLMService
+from services.image_analysis_service import get_image_analysis_service
 from core.nlp.embedder import Embedder
 from config.settings import settings
 from utils.logger import get_logger
@@ -61,17 +62,9 @@ async def _get_or_create_user(
     Returns:
         (user, is_new, just_linked): 사용자 객체, 신규 여부, 방금 연동 여부
     """
-    result = await db.execute(
-        select(User).where(User.kakao_channel_user_key == plus_friend_user_key)
-    )
-    user = result.scalar_one_or_none()
-
-    if user:
-        return user, False, False
-
-    # ── OAuth 계정 자동 연동 체크 ─────────────────────────
+    # ── OAuth 계정 자동 연동 체크 (기존 채널 계정 조회보다 우선) ─────────────────────────
     # /kakao/channel-auth/{token} 클릭 후 채널 메시지를 보낸 경우
-    # Redis에 channel_auth_pending:{user_id} 가 있으면 해당 OAuth 계정에 연동
+    # 기존 채널 전용 계정이 있더라도 OAuth 연동 대기가 있으면 우선 처리
     try:
         from uuid import UUID
         pending_keys = await redis_client.keys("channel_auth_pending:*")
@@ -85,6 +78,23 @@ async def _get_or_create_user(
                 oauth_user = result.scalar_one_or_none()
 
                 if oauth_user and not oauth_user.kakao_channel_user_key:
+                    # 동일 channel_user_key를 가진 기존 채널 전용 계정이 있으면 먼저 해제
+                    dup_result = await db.execute(
+                        select(User).where(User.kakao_channel_user_key == plus_friend_user_key)
+                    )
+                    dup_user = dup_result.scalar_one_or_none()
+                    if dup_user and dup_user.id != oauth_user.id:
+                        # OAuth 계정(access_token 보유)은 덮어쓰지 않음 - 채널 전용 ch_ 계정만 해제
+                        if dup_user.kakao_access_token:
+                            logger.warning(
+                                f"채널 key 충돌: {dup_user.kakao_id}는 OAuth 계정이므로 해제 생략 "
+                                f"(이미 다른 OAuth 계정이 연동됨)"
+                            )
+                            continue
+                        dup_user.kakao_channel_user_key = None
+                        await db.flush()
+                        logger.info(f"기존 채널 전용 계정에서 key 해제: {dup_user.kakao_id}")
+
                     # 연동 실행
                     oauth_user.kakao_channel_user_key = plus_friend_user_key
                     await db.commit()
@@ -108,6 +118,15 @@ async def _get_or_create_user(
 
     except Exception as e:
         logger.warning(f"채널 연동 체크 실패 (무시): {e}")
+
+    # ── 기존 채널 사용자 조회 ─────────────────────────
+    result = await db.execute(
+        select(User).where(User.kakao_channel_user_key == plus_friend_user_key)
+    )
+    user = result.scalar_one_or_none()
+
+    if user:
+        return user, False, False
 
     # 신규 채널 사용자 생성
     user = User(
@@ -138,20 +157,144 @@ async def _register_user_schedule(user_id: str) -> None:
 
 # ── MCDI 백그라운드 분석 ──────────────────────────────
 
+async def _analyze_and_reply_image(
+    user_id: str,
+    image_url: str,
+    channel_user_key: str
+) -> None:
+    """
+    이미지 분석 2턴 플로우 백그라운드 태스크
+
+    Turn 2 처리 (Turn 1: 봇이 VISUAL 카테고리로 사진 요청):
+    1. 카카오 CDN에서 이미지 다운로드 (base64)
+    2. GPT-4o Vision으로 사진 내용 분석
+    3. 이미지 컨텍스트 Redis 저장 (ER 후속 질문용)
+    4. ER 후속 질문 포함한 AI 응답 생성
+    5. 대화 DB 저장 (Conversation 레코드)
+    6. 채널로 응답 전송 (OAuth send_to_me or 비즈메시지)
+    """
+    import httpx, base64
+
+    try:
+        logger.info(f"이미지 분석 2턴 시작: user={user_id}")
+
+        # 1. 이미지 다운로드
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            img_resp = await client.get(image_url)
+            img_resp.raise_for_status()
+            image_base64 = base64.b64encode(img_resp.content).decode("utf-8")
+
+        # 2. GPT-4o Vision으로 분석
+        image_service = get_image_analysis_service()
+        analysis = await image_service.analyze_image(
+            image_base64=image_base64,
+            analysis_type="memory"
+        )
+        analysis_data = analysis.get("analysis", {})
+        objects = ", ".join(analysis_data.get("main_objects", []))
+        mood = analysis_data.get("mood", "")
+        time_of_day = analysis_data.get("time_of_day", "")
+        scene = analysis_data.get("scene", "")
+        image_description = (
+            f"[사진 공유] 사진 속 주요 내용: {objects}."
+            + (f" 분위기: {mood}." if mood else "")
+            + (f" 시간대: {time_of_day}." if time_of_day else "")
+            + (f" 장면: {scene}." if scene else "")
+        )
+        logger.info(f"이미지 분석 완료: {image_description[:80]}")
+
+        # 3. 이미지 컨텍스트 Redis 저장 (ER 후속 질문에서 활용)
+        visual_context = {
+            "image_url": image_url,
+            "objects": objects,
+            "mood": mood,
+            "time_of_day": time_of_day,
+            "scene": scene,
+            "description": image_description,
+            "timestamp": datetime.now().isoformat(),
+        }
+        await redis_client.set_json(
+            f"visual_context:{user_id}",
+            visual_context,
+            ttl=3600  # 1시간 유지
+        )
+
+        # 4. ER 후속 질문 포함 AI 응답 생성
+        #    dialogue_manager에 image_description을 user_message로 전달 →
+        #    VISUAL 카테고리 시스템 프롬프트가 사물/상황에 대한 기억 탐색 질문 생성
+        dialogue_manager = get_dialogue_manager()
+        ai_response = await dialogue_manager.generate_response(
+            user_id=user_id,
+            user_message=image_description
+        )
+
+        # 5. 대화 DB 저장 (이미지 2턴 기록)
+        try:
+            async with AsyncSessionLocal() as db:
+                from database.models import User, Conversation
+                result = await db.execute(
+                    select(User).where(User.kakao_channel_user_key == channel_user_key)
+                )
+                user_obj = result.scalar_one_or_none()
+                if user_obj:
+                    conv = Conversation(
+                        user_id=user_obj.id,
+                        message="[사진 공유]",
+                        response=ai_response,
+                        message_type="image",
+                        image_url=image_url,
+                        category="VISUAL",
+                        response_latency_ms=0,
+                    )
+                    db.add(conv)
+                    await db.commit()
+                    logger.info(f"이미지 대화 DB 저장 완료: user={user_id}")
+        except Exception as db_err:
+            logger.warning(f"이미지 대화 DB 저장 실패 (응답은 전송): {db_err}")
+
+        # 6. 채널로 응답 전송
+        from services.kakao_client import KakaoClient
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(User).where(User.kakao_channel_user_key == channel_user_key)
+            )
+            user_obj = result.scalar_one_or_none()
+            if user_obj and user_obj.kakao_access_token:
+                kakao_client = KakaoClient()
+                await kakao_client.send_to_me(
+                    access_token=user_obj.kakao_access_token,
+                    message=ai_response
+                )
+                logger.info(f"이미지 분석 결과 전송 완료: user={user_id}")
+            else:
+                logger.warning(
+                    f"이미지 응답 전송 불가 - OAuth 토큰 없음: user={user_id}. "
+                    "채널 전용 사용자는 OAuth 연동 필요"
+                )
+
+    except Exception as e:
+        logger.error(f"이미지 분석 2턴 플로우 실패: {e}", exc_info=True)
+
+
 async def _run_mcdi_analysis(
     user_id: str,
     message: str,
     conversation_id: int,
-    response_latency_sec: float
+    response_latency_sec: float,
+    conversation_mode: str = "normal"
 ) -> None:
     """
     MCDI 분석 백그라운드 태스크
 
     웹훅 응답 후 비동기로 실행 (카카오 5초 타임아웃 영향 없음).
     6개 지표 분석 → MCDI 점수 → DB 저장.
+
+    Args:
+        conversation_mode: 대화 모드 ("normal" | "story" | "role_reversal")
+                           스토리 모드일 때 SD 점수 과대평가 가능성 플래그 저장
     """
     try:
-        logger.info(f"MCDI 분석 시작 - user: {user_id}, conv: {conversation_id}")
+        logger.info(f"MCDI 분석 시작 - user: {user_id}, conv: {conversation_id}, mode: {conversation_mode}")
 
         analyzer = get_analyzer()
         result = await analyzer.analyze(
@@ -173,6 +316,15 @@ async def _run_mcdi_analysis(
             }
         )
 
+        # 보완 2: 스토리 모드 SD 편향 플래그 (주제 연속성으로 SD 점수 과대평가 가능)
+        sd_detail = result.get("sd_detail") or {}
+        if conversation_mode == "story":
+            sd_detail = {
+                **sd_detail,
+                "story_mode_active": True,
+                "score_note": "스토리 모드 활성화 - 주제 연속성으로 SD 점수가 과대평가될 수 있음"
+            }
+
         # DB 저장 (별도 세션 - 백그라운드)
         async with AsyncSessionLocal() as db:
             analysis = AnalysisResult(
@@ -183,7 +335,7 @@ async def _run_mcdi_analysis(
                 lr_score=scores.get("LR"),
                 lr_detail=result.get("lr_detail"),
                 sd_score=scores.get("SD"),
-                sd_detail=result.get("sd_detail"),
+                sd_detail=sd_detail,
                 nc_score=scores.get("NC"),
                 nc_detail=result.get("nc_detail"),
                 to_score=scores.get("TO"),
@@ -199,6 +351,41 @@ async def _run_mcdi_analysis(
             await db.commit()
             logger.info(f"MCDI 분석 결과 저장 완료 - score: {mcdi_score}, risk: {risk_level}")
 
+            # TimescaleDB 시계열 저장 (MCDI 트렌드 추적)
+            try:
+                from database.timescale import get_timescale
+                timescale = await get_timescale()
+                await timescale.store_mcdi(
+                    user_id=user_id,
+                    mcdi_score=mcdi_score,
+                    scores=scores,
+                    risk_level=risk_level
+                )
+                logger.info(f"TimescaleDB 시계열 저장 완료 - user: {user_id}")
+            except Exception as te:
+                logger.warning(f"TimescaleDB 저장 실패 (무시): {te}")
+
+            # 게이미피케이션 업데이트 (꽃 심기 + DB 동기화)
+            try:
+                from core.analysis.garden_mapper import GardenMapper
+                garden_mapper = GardenMapper(db_session=db)
+                garden_update = await garden_mapper.update_garden_status(
+                    user_id=user_id,
+                    mcdi_score=mcdi_score,
+                    risk_level=risk_level
+                )
+                logger.info(
+                    f"정원 업데이트 완료",
+                    extra={
+                        "user_id": user_id,
+                        "flower_count": garden_update.current_status.flower_count,
+                        "consecutive_days": garden_update.current_status.consecutive_days,
+                        "achievements": garden_update.achievements_unlocked
+                    }
+                )
+            except Exception as ge:
+                logger.warning(f"게이미피케이션 업데이트 실패 (무시): {ge}")
+
     except Exception as e:
         logger.error(f"MCDI 분석 실패 - user: {user_id}: {e}", exc_info=True)
 
@@ -211,6 +398,30 @@ def _build_kakao_response(text: str) -> Dict[str, Any]:
         "version": "2.0",
         "template": {
             "outputs": [{"simpleText": {"text": text}}]
+        }
+    }
+
+
+def _build_kakao_response_with_button(
+    text: str,
+    button_text: str,
+    button_url: str
+) -> Dict[str, Any]:
+    """카카오 i 오픈빌더 응답 형식 생성 (버튼 포함)
+
+    카카오 채널에서 버튼을 표시하려면 quickReplies 사용.
+    """
+    return {
+        "version": "2.0",
+        "template": {
+            "outputs": [{
+                "simpleText": {"text": text}
+            }],
+            "quickReplies": [{
+                "action": "webLink",
+                "label": button_text,
+                "webLinkUrl": button_url
+            }]
         }
     }
 
@@ -246,24 +457,37 @@ async def kakao_webhook(
 
         plus_friend_user_key = (
             user_properties.get("plusfriendUserKey")
-            or user_properties.get("plusfriend_user_key", "unknown")
+            or user_properties.get("plusfriend_user_key")
         )
-        bot_user_key = (
-            user_properties.get("botUserKey")
-            or user_info.get("id", "unknown")
-        )
+        bot_user_key = user_properties.get("botUserKey") or user_info.get("id", "")
         utterance = user_request.get("utterance", "").strip()
 
         logger.info(
             "카카오 메시지 수신",
             extra={
-                "plus_friend_user_key": plus_friend_user_key,
+                "plus_friend_user_key": plus_friend_user_key or "(없음)",
                 "utterance_preview": utterance[:30]
             }
         )
 
         if not utterance:
             return _build_kakao_response("메시지를 입력해 주세요. 🌱")
+
+        # plusfriendUserKey 없음 → 채널 메시지가 아닌 환경 (스킬 콘솔 테스트 등)
+        if not plus_friend_user_key:
+            logger.warning(
+                "plusfriendUserKey 없음 (스킬 콘솔 테스트)",
+                extra={"bot_user_key": bot_user_key, "utterance": utterance[:30]}
+            )
+            return _build_kakao_response("안녕하세요! 기억의 정원입니다. 🌱")
+
+        # ── 이미지 URL 감지 ───────────────────────────
+        image_url = None
+        message_type = "text"
+        KAKAO_IMAGE_HOSTS = ("talk.kakaocdn.net", "k.kakaocdn.net")
+        if any(host in utterance for host in KAKAO_IMAGE_HOSTS):
+            image_url = utterance
+            message_type = "image"
 
         # ── 2. 사용자 조회/생성 ───────────────────────
         user, is_new_user, just_linked = await _get_or_create_user(db, plus_friend_user_key, bot_user_key)
@@ -282,41 +506,142 @@ async def kakao_webhook(
         if is_new_user:
             background_tasks.add_task(_register_user_schedule, user_id)
 
+        # ── 2.4. 채널 전용 사용자 → OAuth 로그인 유도 ──────────────────
+        # OAuth 토큰이 없는 채널 사용자가 스케줄 메시지를 받으려면 로그인 필요
+        if not is_new_user and not user.kakao_access_token and user.kakao_channel_user_key:
+            session_data = await redis_client.get_json(f"session:{user_id}")
+            if session_data and session_data.get("pending_oauth_prompt"):
+                # OAuth 로그인 안내 메시지
+                oauth_message = session_data.get("oauth_prompt_message", (
+                    "🔔 안녕하세요! 정원지기예요 🌱\n\n"
+                    "매일 정해진 시간에 기억의 정원에서 드리는\n"
+                    "아침/점심/저녁 인사를 받으시려면 로그인이 필요해요.\n\n"
+                    "아래 버튼을 눌러 간편하게 로그인해주세요!"
+                ))
+                # 프롬프트 표시 후 플래그 제거
+                session_data["pending_oauth_prompt"] = False
+                await redis_client.set_json(f"session:{user_id}", session_data)
+                logger.info(f"OAuth 로그인 유도 메시지 전송: {user_id}")
+
+                # 올바른 Kakao OAuth URL 생성
+                import urllib.parse
+                oauth_url = (
+                    f"https://kauth.kakao.com/oauth/authorize"
+                    f"?client_id={settings.KAKAO_REST_API_KEY}"
+                    f"&redirect_uri={urllib.parse.quote(settings.KAKAO_REDIRECT_URI, safe='')}"
+                    f"&response_type=code"
+                )
+                return _build_kakao_response_with_button(
+                    oauth_message,
+                    button_text="로그인 하기 🔐",
+                    button_url=oauth_url
+                )
+
+        # ── 2.5. 온보딩 플로우 체크 ──────────────────
+        # Day 0: 정원 이름 짓기 처리 (2단계: 환영 먼저 → 다음 메시지가 이름)
+        if user.onboarding_day == 0 and message_type == "text":
+            from core.workflow.onboarding_flow import OnboardingFlow
+            ob_flow = OnboardingFlow(db)
+            is_onboarding, ob_response = await ob_flow.handle(user, utterance)
+            if is_onboarding and ob_response:
+                # Day 0 대화는 DB에 저장 후 온보딩 응답 반환
+                dialogue_manager = get_dialogue_manager()
+                await dialogue_manager.add_turn(
+                    user_id=user_id,
+                    user_message=utterance,
+                    assistant_message=ob_response,
+                    metadata={"onboarding_day": user.onboarding_day}
+                )
+                conversation = Conversation(
+                    user_id=user.id,
+                    message=utterance,
+                    response=ob_response,
+                    message_type="text",
+                    category="onboarding"
+                )
+                db.add(conversation)
+                await db.commit()
+                logger.info(f"온보딩 Day 0 응답 반환: {user_id}")
+                return _build_kakao_response(ob_response)
+
         # ── 3. AI 응답 생성 ───────────────────────────
         dialogue_manager = get_dialogue_manager()
-        ai_response = await dialogue_manager.generate_response(
-            user_id=user_id,
-            user_message=utterance
-        )
+        conv_mode = "normal"  # 보완 2: 대화 모드 (SD 편향 플래그용, 기본값)
+        selected_category = None  # HIGH-2: 6개 카테고리 라우팅
+
+        if message_type == "image":
+            # 이미지는 즉시 응답 후 백그라운드에서 분석
+            # 카카오 5초 타임아웃 내에 응답 불가 → 분석은 비동기 처리
+            user_message_for_save = "[사진 공유] 사진을 받았어요."
+            ai_response = "사진을 받았어요! 🌿 잠깐만 기다려 주세요, 사진을 살펴볼게요..."
+            selected_category = "VISUAL"
+            background_tasks.add_task(
+                _analyze_and_reply_image,
+                user_id=user_id,
+                image_url=image_url,
+                channel_user_key=plus_friend_user_key
+            )
+        else:
+            user_message_for_save = utterance
+
+            # HIGH-2: 카테고리 선택 (약한 지표 우선, 주간 빈도 제한 적용)
+            try:
+                from core.dialogue.category_selector import CategorySelector, get_category_prompt_hint
+                category_selector = CategorySelector()
+                selected_category = await category_selector.select(user_id=user_id)
+                category_hint = get_category_prompt_hint(selected_category)
+                # 세션 컨텍스트에 카테고리 힌트 저장 → prompt_builder가 활용
+                await dialogue_manager.update_context(user_id, {
+                    "current_category": selected_category,
+                    "category_hint": category_hint,
+                })
+                logger.info(
+                    f"카테고리 선택: {selected_category}",
+                    extra={"user_id": user_id, "category": selected_category}
+                )
+            except Exception as cat_err:
+                logger.warning(f"카테고리 선택 실패 (기본값 사용): {cat_err}")
+                selected_category = "DAILY_EPISODIC"
+
+            ai_response = await dialogue_manager.generate_response(
+                user_id=user_id,
+                user_message=user_message_for_save
+            )
+            conv_mode = await dialogue_manager.get_last_conversation_mode(user_id)
 
         # ── 4. 대화 저장 ──────────────────────────────
         elapsed_ms = int((time.time() - start_time) * 1000)
 
         await dialogue_manager.add_turn(
             user_id=user_id,
-            user_message=utterance,
+            user_message=user_message_for_save,
             assistant_message=ai_response,
-            metadata={"response_latency_ms": elapsed_ms}
+            metadata={"response_latency_ms": elapsed_ms, "category": selected_category}
         )
 
         conversation = Conversation(
             user_id=user.id,
-            message=utterance,
+            message=user_message_for_save,
             response=ai_response,
-            message_type="text",
-            response_latency_ms=elapsed_ms
+            message_type=message_type,
+            image_url=image_url,
+            response_latency_ms=elapsed_ms,
+            category=selected_category,  # HIGH-2: 카테고리 저장
         )
         db.add(conversation)
         await db.commit()
         await db.refresh(conversation)
 
         # ── 5. MCDI 분석 백그라운드 등록 ──────────────
+        # Day 15+ (베이스라인 완성) 이후만 정식 MCDI 분석 실행
+        # Day 1-14: 분석은 실행하되 알림은 발송하지 않음 (데이터 축적)
         background_tasks.add_task(
             _run_mcdi_analysis,
             user_id=user_id,
-            message=utterance,
+            message=user_message_for_save,
             conversation_id=conversation.id,
-            response_latency_sec=elapsed_ms / 1000
+            response_latency_sec=elapsed_ms / 1000,
+            conversation_mode=conv_mode
         )
 
         logger.info(

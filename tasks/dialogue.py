@@ -1010,7 +1010,7 @@ async def _send_via_oauth(user, message: str) -> Dict[str, Any]:
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     resp = await client.post(
-                        f"http://localhost:8001/api/v1/auth/kakao/refresh/{user.kakao_id}"
+                        f"http://localhost:8002/api/v1/auth/kakao/refresh/{user.kakao_id}"
                     )
                     resp.raise_for_status()
                 logger.info(f"Token refreshed for {user.kakao_id}")

@@ -1232,8 +1232,7 @@ async def kakao_webhook(
             ai_response = await dialogue_manager.generate_response(
                 user_id=user_id,
                 user_message=user_message_for_save,
-                mcdi_context=mcdi_context,  # 어댑티브 대화 블록 생성용
-                next_question=evening_quiz  # 저녁 회상 퀴즈 (캐시된 경우)
+                mcdi_context=mcdi_context  # 어댑티브 대화 블록 생성용
             )
             conv_mode = await dialogue_manager.get_last_conversation_mode(user_id)
 

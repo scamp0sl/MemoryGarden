@@ -1147,6 +1147,66 @@ def _get_time_based_greeting() -> str:
 
 
 # ============================================
+# 저녁 회상 퀴즈 스케줄링
+# ============================================
+
+async def pre_generate_evening_quizzes():
+    """저녁 회상 퀴즈 사전 생성 스케줄 태스크
+
+    17:50에 실행되어 모든 활성 사용자의 퀴즈를 미리 생성.
+    18~24시 사이에 사용자가 메시지를 보내면 캐시된 퀴즈가 즉시 전송됨.
+
+    Returns:
+        생성된 퀴즈 수
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        from sqlalchemy import select
+        from database.models import User
+        from api.routes.kakao_webhook import _pre_generate_evening_quiz
+
+        logger.info("🌙 Pre-generating evening quizzes for all active users")
+
+        # 최근 7일간 활성 사용자 조회
+        seven_days_ago = datetime.now() - timedelta(days=7)
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(User).where(
+                    User.last_interaction_at >= seven_days_ago,
+                    User.onboarding_day >= 15  # 베이스라인 완성된 사용자만
+                )
+            )
+            active_users = result.scalars().all()
+
+        generated_count = 0
+        failed_count = 0
+
+        for user in active_users:
+            try:
+                await _pre_generate_evening_quiz(str(user.id))
+                generated_count += 1
+            except Exception as e:
+                logger.warning(f"Quiz generation failed for {user.id}: {e}")
+                failed_count += 1
+
+        logger.info(
+            f"✅ Evening quiz pre-generation complete: {generated_count} generated, {failed_count} failed",
+            extra={"generated": generated_count, "failed": failed_count}
+        )
+
+        return {
+            "generated": generated_count,
+            "failed": failed_count,
+            "total": len(active_users)
+        }
+
+    except Exception as e:
+        logger.error(f"Evening quiz pre-generation failed: {e}", exc_info=True)
+        return {"generated": 0, "failed": 0, "error": str(e)}
+
+
+# ============================================
 # C5: Proactive Messaging
 # ============================================
 

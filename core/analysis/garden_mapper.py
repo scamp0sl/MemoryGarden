@@ -147,9 +147,9 @@ class GardenMapper:
         GardenMapper 초기화
 
         Args:
-            redis_client: Redis 클라이언트 (None이면 생성)
+            redis_client: Redis 클라이언트 (None이면 싱글톤 인스턴스 사용)
         """
-        self.redis = redis_client or RedisClient()
+        self.redis = redis_client or RedisClient.get_instance()
         logger.info("GardenMapper initialized")
 
     async def update_garden_status(
@@ -289,6 +289,10 @@ class GardenMapper:
         data = await self.redis.get(key)
 
         if data:
+            # JSON 문자열이므로 파싱 필요
+            import json
+            if isinstance(data, str):
+                data = json.loads(data)
             return GardenVisualizationData(**data)
 
         # 첫 방문: 기본 상태 생성
@@ -464,7 +468,12 @@ class GardenMapper:
             # 오늘 이미 대화했음 → 연속 일수 유지
             key = f"garden:{user_id}"
             data = await self.redis.get(key)
-            return data.get("consecutive_days", 1) if data else 1
+            if data:
+                import json
+                if isinstance(data, str):
+                    data = json.loads(data)
+                return data.get("consecutive_days", 1)
+            return 1
 
         # 어제 방문했는지 체크
         yesterday = today - timedelta(days=1)
@@ -472,7 +481,11 @@ class GardenMapper:
             # 연속 참여 중 → +1
             key = f"garden:{user_id}"
             data = await self.redis.get(key)
-            return data.get("consecutive_days", 0) + 1
+            if data:
+                import json
+                if isinstance(data, str):
+                    data = json.loads(data)
+                return data.get("consecutive_days", 0) + 1
 
         # 2일 이상 공백 → 초기화
         return 1
@@ -503,10 +516,13 @@ class GardenMapper:
 
     async def _save_garden_status(self, status: GardenVisualizationData) -> None:
         """정원 상태 Redis 저장"""
+        import json
         key = f"garden:{status.user_id}"
+        # dict를 JSON 문자열로 변환
+        data = json.dumps(status.model_dump(mode='json'), ensure_ascii=False)
         await self.redis.set(
             key,
-            status.model_dump(mode='json'),
+            data,
             ttl=None  # 영구 저장
         )
 

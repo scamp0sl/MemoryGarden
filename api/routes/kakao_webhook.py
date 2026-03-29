@@ -372,7 +372,7 @@ async def _run_mcdi_analysis(
             # 게이미피케이션 업데이트 (꽃 심기 + DB 동기화)
             try:
                 from core.analysis.garden_mapper import GardenMapper
-                garden_mapper = GardenMapper(db_session=db)
+                garden_mapper = GardenMapper()  # redis_client는 내부에서 생성
                 garden_update = await garden_mapper.update_garden_status(
                     user_id=user_id,
                     mcdi_score=mcdi_score,
@@ -633,7 +633,11 @@ async def _pre_generate_evening_quiz(user_id: str) -> None:
 
         # 최근 3일 대화 기록 조회
         async with AsyncSessionLocal() as session:
-            three_days_ago = datetime.now(ZoneInfo("Asia/Seoul")) - __import__("datetime").timedelta(days=3)
+            # timezone-aware를 naive로 변환 (DB 컬럼과 일치)
+            kst = ZoneInfo("Asia/Seoul")
+            three_days_ago = datetime.now(kst) - __import__("datetime").timedelta(days=3)
+            # naive datetime으로 변환 (tzinfo 제거)
+            three_days_ago = three_days_ago.replace(tzinfo=None)
             result = await session.execute(
                 select(Conversation)
                 .where(
@@ -658,21 +662,35 @@ async def _pre_generate_evening_quiz(user_id: str) -> None:
 
         quiz_prompt = (
             f"다음은 사용자와의 최근 대화 기록입니다:\n{convos_text}\n\n"
-            f"이 대화 내용 중에서 사용자가 기억했으면 하는 것을 하나 골라 짧은 회상 퀴즈를 만드세요.\n"
-            f"정답이 명확해야 하고, 사용자가 대답하기 쉬워야 합니다.\n"
-            f"형식: '오늘/최근에 ○○ 하셨는데, 기억나시나요?' 또는 '○○ 드셨는데, 맛있으셨어요?'\n"
+            f"이 대화 내용 중에서 사용자가 기억했으면 하는 것을 하나 골라 짧은 회상 퀴즈를 만드세요.\n\n"
+            f"중요: '기억나시나요?' 같은 힌트 주는 말은 쓰지 말고, 구체적으로 얘기해 달라고 하세요.\n\n"
+            f"좋은 예시:\n"
+            f"- 아침에 등산하면서 본 꽃이 뭔지 얘기해줘요\n"
+            f"- 옛날에 집 마당에 어떤 나무가 있었는지 말씀해 주시겠어요?\n"
+            f"- 봄에 김치 담갔을 때 어떤 반찬이 함께 나왔는지 얘기해 보세요\n\n"
+            f"나쁜 예시 (피할 것):\n"
+            f"- 아침에 등산하셨는데 기억나시나요? (너무 힌트가 많음)\n"
+            f"- 집 마당 기억나세요? (너무 모호함)\n\n"
+            f"형식: '○○이 뭔지 얘기해줘요' 또는 '어떤 ○○이 있었는지 말씀해 주시겠어요?'처럼\n"
             f"반드시 1문장으로만 출력하세요. 추가 설명이나 물음표 이외의 기호 없이."
         )
 
-        llm_service = LLMService()
+        llm_service = LLMService()  # 기본 모델: sonnet-4-6
         quiz_text = await asyncio.wait_for(
-            llm_service.call(prompt=quiz_prompt, model="gpt-4o-mini"),
+            llm_service.call(prompt=quiz_prompt),
             timeout=8.0
         )
 
         if quiz_text and quiz_text.strip():
-            # 퀴즈 캐시 저장 (24시간)
-            await redis_client.set(cache_key, quiz_text.strip(), ttl=86400)
+            # 퀴즈 컨텍스트도 함께 저장 (답변 평가용)
+            import json
+            quiz_context = {
+                "quiz_text": quiz_text.strip(),
+                "source_convos": convos_text[:500],  # 평가용 참고 텍스트
+                "created_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+            }
+            # 퀴즈 캐시 저장 (24시간) - JSON 형식
+            await redis_client.set(cache_key, json.dumps(quiz_context, ensure_ascii=False), ttl=86400)
             # 완료 표시 (24시간)
             await redis_client.set(done_key, "1", ttl=86400)
             logger.info(
@@ -686,6 +704,178 @@ async def _pre_generate_evening_quiz(user_id: str) -> None:
         logger.warning(f"Evening quiz generation timeout for {user_id}")
     except Exception as e:
         logger.error(f"Evening quiz generation failed for {user_id}: {e}", exc_info=True)
+
+
+# ── 퀴즈 답변 평가 ────────────────────────────────────
+
+async def _evaluate_quiz_answer(user_id: str, user_answer: str) -> tuple[bool, str, float | None]:
+    """저녁 회상 퀴즈 답변 평가
+
+    Returns:
+        (is_quiz_response, feedback_message, rt_adjustment)
+        - is_quiz_response: 퀴즈에 대한 답변인지 여부
+        - feedback_message: 피드백 메시지 (없으면 None)
+        - rt_adjustment: MCDI RT 점수 조정값 (-10 ~ +10, None이면 조정 없음)
+    """
+    from zoneinfo import ZoneInfo
+
+    today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+    quiz_cache_key = f"evening_quiz_cache:{user_id}:{today_str}"
+
+    # 캐시된 퀴즈 확인
+    cached_data = await redis_client.get(quiz_cache_key)
+    if not cached_data:
+        return False, None, None
+
+    # JSON 파싱
+    import json
+    try:
+        if isinstance(cached_data, str):
+            quiz_context = json.loads(cached_data)
+        else:
+            quiz_context = cached_data
+    except (json.JSONDecodeError, TypeError):
+        return False, None, None
+
+    quiz_text = quiz_context.get("quiz_text", "")
+    source_convos = quiz_context.get("source_convos", "")
+
+    # 답변 평가 프롬프트
+    eval_prompt = f"""다음은 저녁 회상 퀴즈와 사용자의 답변입니다.
+
+[퀴즈]: {quiz_text}
+
+[사용자 답변]: {user_answer}
+
+[참고 대화 기록]:
+{source_convos}
+
+위 정보를 바탕으로 답변을 평가해주세요:
+
+1. 답변 관련성 (0~100점): 사용자가 퀴즈와 관련된 내용으로 답변했는가?
+2. 기억 정확도 (0~100점): 참고 대화 기록과 일치하는가?
+
+평가 기준:
+- 90점 이상: 정확히 기억함 (RT +5)
+- 70~89점: 대체로 기억함 (RT +2)
+- 50~69점: 부분적으로 기억 (RT 0)
+- 30~49점: 기억 흐릿 (RT -3)
+- 30점 미만: 기억하지 못함 (RT -5)
+
+반드시 JSON 형식으로만 출력:
+{{"relevance": 점수, "accuracy": 점수, "feedback": "짧은 피드백 (1문장)"}}
+"""
+
+    try:
+        llm_service = LLMService()
+        result = await asyncio.wait_for(
+            llm_service.call_json(prompt=eval_prompt),
+            timeout=10.0
+        )
+
+        relevance = result.get("relevance", 50)
+        accuracy = result.get("accuracy", 50)
+        feedback = result.get("feedback", "")
+
+        # 평균 점수로 RT 조정값 계산
+        avg_score = (relevance + accuracy) / 2
+
+        if avg_score >= 90:
+            rt_adjustment = 5
+            feedback_msg = f"{feedback} 기억력이 아주 좋으시네요! 🌟"
+        elif avg_score >= 70:
+            rt_adjustment = 2
+            feedback_msg = f"{feedback} 잘 기억하고 계시네요! 👍"
+        elif avg_score >= 50:
+            rt_adjustment = 0
+            feedback_msg = f"{feedback} 그렇군요."
+        elif avg_score >= 30:
+            rt_adjustment = -3
+            feedback_msg = f"{feedback} 기억이 조금 흐릿하신가 봐요. 🌱"
+        else:
+            rt_adjustment = -5
+            feedback_msg = f"{feedback} 다시 얘기해 주시면 기억나실 수도 있어요."
+
+        # 퀴즈 캐시 삭제 (평가 완료)
+        await redis_client.delete(quiz_cache_key)
+
+        logger.info(
+            f"Quiz answer evaluated for {user_id}: score={avg_score:.1f}, RT={rt_adjustment:+d}",
+            extra={"user_id": user_id, "quiz_score": avg_score, "rt_adjustment": rt_adjustment}
+        )
+
+        return True, feedback_msg, rt_adjustment
+
+    except asyncio.TimeoutError:
+        logger.warning(f"Quiz evaluation timeout for {user_id}")
+        return False, None, None
+    except Exception as e:
+        logger.error(f"Quiz evaluation failed for {user_id}: {e}", exc_info=True)
+        return False, None, None
+
+
+async def _adjust_mcdi_rt_score(user_id: str, rt_adjustment: int) -> None:
+    """퀴즈 답변 평가 결과를 MCDI RT 점수에 반영
+
+    Args:
+        user_id: 사용자 ID
+        rt_adjustment: RT 점수 조정값 (-10 ~ +10)
+    """
+    from sqlalchemy import select, desc
+    from database.models import AnalysisResult
+
+    try:
+        async with AsyncSessionLocal() as session:
+            # 가장 최근 MCDI 분석 결과 조회
+            result = await session.execute(
+                select(AnalysisResult)
+                .where(AnalysisResult.user_id == user_id)
+                .order_by(desc(AnalysisResult.created_at))
+                .limit(1)
+            )
+            latest_analysis = result.scalars().first()
+
+            if not latest_analysis:
+                logger.info(f"No MCDI analysis found for {user_id}, skipping RT adjustment")
+                return
+
+            # RT 점수 조정
+            scores = latest_analysis.scores or {}
+            current_rt = scores.get("RT", 50)
+            new_rt = max(0, min(100, current_rt + rt_adjustment))
+
+            scores["RT"] = new_rt
+            latest_analysis.scores = scores
+
+            # MCDI 점수 재계산
+            from core.analysis.mcdi_calculator import MCDICalculator
+            calculator = MCDICalculator()
+            new_mcdi_score = calculator.calculate(
+                lr_score=scores.get("LR", 50),
+                sd_score=scores.get("SD", 50),
+                nc_score=scores.get("NC", 50),
+                to_score=scores.get("TO", 50),
+                er_score=scores.get("ER", 50),
+                rt_score=new_rt
+            )
+
+            latest_analysis.mcdi_score = new_mcdi_score
+
+            # 위험도 재평가
+            from core.analysis.risk_evaluator import RiskEvaluator
+            evaluator = RiskEvaluator()
+            new_risk_level = evaluator.evaluate(new_mcdi_score)
+            latest_analysis.risk_level = new_risk_level
+
+            await session.commit()
+
+            logger.info(
+                f"RT score adjusted for {user_id}: {current_rt} → {new_rt} (adjustment: {rt_adjustment:+d}), MCDI: {new_mcdi_score:.1f}",
+                extra={"user_id": user_id, "rt_adjustment": rt_adjustment, "new_mcdi": new_mcdi_score}
+            )
+
+    except Exception as e:
+        logger.error(f"Failed to adjust RT score for {user_id}: {e}", exc_info=True)
 
 
 # ── 카카오 응답 형식 ──────────────────────────────────
@@ -862,25 +1052,80 @@ async def kakao_webhook(
                 logger.info(f"온보딩 Day 0 응답 반환: {user_id}")
                 return _build_kakao_response(ob_response)
 
-        # ── 3. AI 응답 생성 ───────────────────────────
+        # ── 3. 저녁 회상 퀴즈 발송 체크 (방안 D) ───────────────────────────
+        # 저녁 시간(18~24시) 첫 메시지에 퀴즈만 전송
+        # 당일 자정까지 퀴즈 유효, 다음날 넘어가면 무효화
+        from zoneinfo import ZoneInfo
+        now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+        today_str = now_kst.strftime("%Y-%m-%d")
+
+        # 저녁 시간대(18~24시) 체크
+        if 18 <= now_kst.hour < 24 and message_type == "text":
+            quiz_sent_key = f"evening_quiz_sent:{user_id}:{today_str}"
+            quiz_cache_key = f"evening_quiz_cache:{user_id}:{today_str}"
+
+            # 아직 퀴즈 안 보냈고, 캐시된 퀴즈가 있으면
+            if not await redis_client.exists(quiz_sent_key):
+                cached_data = await redis_client.get(quiz_cache_key)
+                if cached_data:
+                    # JSON 파싱
+                    import json
+                    try:
+                        if isinstance(cached_data, str):
+                            quiz_context = json.loads(cached_data)
+                        else:
+                            quiz_context = cached_data
+                        quiz_text = quiz_context.get("quiz_text", "")
+                    except (json.JSONDecodeError, TypeError):
+                        quiz_text = str(cached_data)
+
+                    if quiz_text and quiz_text.strip():
+                        # 퀴즈만 단독 전송
+                        quiz_response = (
+                            f"━━━━━━━━━━━━━━\n"
+                            f"📝 오늘의 회상 퀴즈\n"
+                            f"━━━━━━━━━━━━━━\n\n"
+                            f"{quiz_text.strip()}"
+                        )
+
+                        # 대화 저장
+                        dialogue_manager = get_dialogue_manager()
+                        await dialogue_manager.add_turn(
+                            user_id=user_id,
+                            user_message=utterance,
+                            assistant_message=quiz_response,
+                            metadata={"evening_quiz": True}
+                        )
+
+                        conversation = Conversation(
+                            user_id=user.id,
+                            message=utterance,
+                            response=quiz_response,
+                            message_type="text",
+                            category="quiz"
+                        )
+                        db.add(conversation)
+                        await db.commit()
+
+                        # 퀴즈 전송 플래그 설정 (당일 자정까지만 유효)
+                        # 자정까지 남은 시간 계산 (초 단위)
+                        seconds_until_midnight = (
+                            (datetime.now(ZoneInfo("Asia/Seoul")).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+                            - datetime.now(ZoneInfo("Asia/Seoul"))
+                        ).total_seconds()
+                        await redis_client.set(quiz_sent_key, "1", ttl=int(seconds_until_midnight))
+
+                        logger.info(
+                            f"Evening quiz sent for {user_id}: {quiz_text[:30]}",
+                            extra={"user_id": user_id, "quiz_text": quiz_text[:50]}
+                        )
+
+                        return _build_kakao_response(quiz_response)
+
+        # ── 4. AI 응답 생성 ───────────────────────────
         dialogue_manager = get_dialogue_manager()
         conv_mode = "normal"  # 보완 2: 대화 모드 (SD 편향 플래그용, 기본값)
         selected_category = None  # HIGH-2: 6개 카테고리 라우팅
-
-        # ========== 저녁 회상 퀴즈 캐시 확인 ==========
-        evening_quiz = None
-        now_kst_check = datetime.now(ZoneInfo("Asia/Seoul"))
-        if 18 <= now_kst_check.hour < 24:
-            today_str_check = now_kst_check.strftime("%Y-%m-%d")
-            quiz_cache_key = f"evening_quiz_cache:{user_id}:{today_str_check}"
-            cached_quiz = await redis_client.get(quiz_cache_key)
-            if cached_quiz:
-                evening_quiz = cached_quiz
-                logger.info(
-                    f"Evening quiz delivered for {user_id}: {evening_quiz[:50]}",
-                    extra={"user_id": user_id}
-                )
-        # ==============================================
 
         if message_type == "image":
             # 이미지는 즉시 응답 후 백그라운드에서 분석
@@ -907,6 +1152,41 @@ async def kakao_webhook(
                 )
                 return _build_kakao_response("")  # 빈 응답으로 중복 방지
             # ============================================================
+
+            # ========== 저녁 회상 퀴즈 답변 평가 ==========
+            # 퀴즈를 이미 보낸 상태면 답변을 평가
+            is_quiz_answer = False
+            quiz_feedback = None
+            rt_adjustment = None
+
+            quiz_sent_key = f"evening_quiz_sent:{user_id}:{today_str}"
+            quiz_cache_key = f"evening_quiz_cache:{user_id}:{today_str}"
+
+            # 퀴즈를 보냈으면 답변 평가 시도
+            if await redis_client.exists(quiz_sent_key):
+                is_quiz_answer, quiz_feedback, rt_adjustment = await _evaluate_quiz_answer(
+                    user_id=user_id,
+                    user_answer=user_message_for_save
+                )
+
+                if is_quiz_answer and quiz_feedback:
+                    # 퀴즈 피드백을 AI 응답 앞에 추가
+                    logger.info(
+                        f"Quiz answer evaluated for {user_id}: RT={rt_adjustment}",
+                        extra={"user_id": user_id, "rt_adjustment": rt_adjustment}
+                    )
+
+                    # RT 점수 조정 (백그라운드로 MCDI 재분석)
+                    if rt_adjustment is not None:
+                        background_tasks.add_task(
+                            _adjust_mcdi_rt_score,
+                            user_id=user_id,
+                            rt_adjustment=rt_adjustment
+                        )
+
+                    # 퀴즈 캐시 삭제 (평가 완료)
+                    await redis_client.delete(quiz_cache_key)
+            # =============================================
 
             # HIGH-2: 카테고리 선택 (약한 지표 우선, 주간 빈도 제한 적용)
             try:

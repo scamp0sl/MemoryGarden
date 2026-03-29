@@ -150,9 +150,10 @@ class DialogueScheduler:
         """C5: Proactive Messaging 스케줄 등록
 
         매일 10시, 15시, 20시에 비활성 사용자에게 메시지 발송
+        17:50에 저녁 회상 퀴즈 사전 생성
         """
         try:
-            from tasks.dialogue import send_proactive_messages
+            from tasks.dialogue import send_proactive_messages, pre_generate_evening_quizzes
 
             trigger_times = ["10:00", "15:00", "20:00"]
 
@@ -180,6 +181,26 @@ class DialogueScheduler:
                     logger.info(f"✅ Registered proactive messaging job at {time_str}")
                 else:
                     logger.debug(f"Proactive messaging job already exists at {time_str}")
+
+            # 저녁 회상 퀴즈 사전 생성 스케줄 (17:50)
+            quiz_job_id = "evening_quiz_pre_generation"
+            existing_quiz_job = self.scheduler.get_job(quiz_job_id)
+            if existing_quiz_job is None:
+                quiz_trigger = CronTrigger(
+                    hour=17,
+                    minute=50,
+                    timezone=TIMEZONE
+                )
+                self.scheduler.add_job(
+                    func=pre_generate_evening_quizzes,
+                    trigger=quiz_trigger,
+                    id=quiz_job_id,
+                    name="Evening quiz pre-generation",
+                    replace_existing=True
+                )
+                logger.info("✅ Registered evening quiz pre-generation job at 17:50")
+            else:
+                logger.debug("Evening quiz pre-generation job already exists")
 
         except Exception as e:
             logger.error(f"Failed to register proactive messaging job: {e}", exc_info=True)

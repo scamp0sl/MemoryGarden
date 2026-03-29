@@ -1,10 +1,11 @@
 """
 LLM 서비스
 
-OpenAI API를 사용한 텍스트 생성 및 분석.
+Anthropic Claude API를 사용한 텍스트 생성 및 분석.
 
 Author: Memory Garden Team
 Created: 2025-01-15
+Updated: 2026-03-29 (Claude Sonnet로 변경)
 """
 
 # ============================================
@@ -16,7 +17,8 @@ from typing import Optional, Dict, Any, List
 # ============================================
 # 2. Third-Party Imports
 # ============================================
-from openai import AsyncOpenAI, OpenAIError, RateLimitError
+from anthropic import AsyncAnthropic
+from anthropic import APIError as AnthropicError, RateLimitError as AnthropicRateLimitError
 
 # ============================================
 # 3. Local Imports
@@ -32,7 +34,20 @@ logger = get_logger(__name__)
 # ============================================
 # 5. 상수 정의
 # ============================================
-DEFAULT_MODEL = "gpt-4o-mini"  # 빠르고 저렴한 모델
+# Claude 모델 매핑 (최신 4.6 시리즈)
+CLAUDE_MODELS = {
+    # Sonnet 4.6 (기본, 균형형)
+    "sonnet": "claude-sonnet-4-20250514",      # Claude Sonnet 4.6
+    "sonnet-4-6": "claude-sonnet-4-20250514",   # 별칭
+    # Opus 4.6 (최고 성능)
+    "opus": "claude-opus-4-20250514",           # Claude Opus 4.6
+    "opus-4-6": "claude-opus-4-20250514",       # 별칭
+    # Haiku 4.6 (고속 저비용)
+    "haiku": "claude-haiku-4-20250514",         # Claude Haiku 4.6
+    "haiku-4-6": "claude-haiku-4-20250514",     # 별칭
+}
+
+DEFAULT_MODEL = "sonnet-4-6"  # 기본 모델: Sonnet 4.6 (최신)
 DEFAULT_TEMPERATURE = 0.7
 DEFAULT_MAX_TOKENS = 1000
 
@@ -43,14 +58,14 @@ DEFAULT_MAX_TOKENS = 1000
 
 class LLMService:
     """
-    OpenAI API 래퍼 클래스
+    Anthropic Claude API 래퍼 클래스
 
     비동기 텍스트 생성 및 JSON 응답 파싱 지원.
 
     Attributes:
-        client: AsyncOpenAI 클라이언트
+        client: AsyncAnthropic 클라이언트
         model: 사용할 모델 이름
-        temperature: 샘플링 온도 (0.0~2.0)
+        temperature: 샘플링 온도 (0.0~1.0)
         max_tokens: 최대 토큰 수
 
     Example:
@@ -70,17 +85,26 @@ class LLMService:
         LLMService 초기화
 
         Args:
-            model: OpenAI 모델 이름
-            temperature: 샘플링 온도 (0.0~2.0)
+            model: Claude 모델 이름 (sonnet/opus/haiku)
+            temperature: 샘플링 온도 (0.0~1.0)
             max_tokens: 최대 생성 토큰 수
         """
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        self.model = model
+        # API 키 확인
+        api_key = settings.CLAUDE_API_KEY or settings.ANTHROPIC_API_KEY
+        if not api_key:
+            raise ValueError("CLAUDE_API_KEY or ANTHROPIC_API_KEY must be set in settings")
+
+        self.client = AsyncAnthropic(api_key=api_key)
+
+        # 모델 매핑
+        self.model = CLAUDE_MODELS.get(model, model)
+        self.model_name = model  # 원본 모델 이름 저장
+
         self.temperature = temperature
         self.max_tokens = max_tokens
 
         logger.info(
-            f"LLMService initialized",
+            f"LLMService initialized with Claude",
             extra={
                 "model": self.model,
                 "temperature": self.temperature,
@@ -97,7 +121,7 @@ class LLMService:
         json_mode: bool = False
     ) -> str:
         """
-        OpenAI API 호출
+        Claude API 호출
 
         Args:
             prompt: 사용자 프롬프트
@@ -110,7 +134,7 @@ class LLMService:
             str: LLM 응답 텍스트
 
         Raises:
-            OpenAIError: API 호출 실패 시
+            AnthropicError: API 호출 실패 시
 
         Example:
             >>> llm = LLMService()
@@ -123,55 +147,50 @@ class LLMService:
             '{"emotion": "joy", "intensity": 0.8}'
         """
         try:
-            # 메시지 구성
-            messages = []
-
-            if system_prompt:
-                messages.append({
-                    "role": "system",
-                    "content": system_prompt
-                })
-
-            messages.append({
-                "role": "user",
-                "content": prompt
-            })
-
             # API 호출 파라미터
             params = {
                 "model": self.model,
-                "messages": messages,
-                "temperature": temperature or self.temperature,
                 "max_tokens": max_tokens or self.max_tokens,
+                "temperature": temperature or self.temperature,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ]
             }
 
-            # JSON 모드 활성화
+            # 시스템 프롬프트
+            if system_prompt:
+                params["system"] = system_prompt
+
+            # JSON 모드 - 프롬프트에 지시사항 추가
             if json_mode:
-                params["response_format"] = {"type": "json_object"}
+                if system_prompt:
+                    params["system"] += "\n\n반드시 JSON 형식으로만 응답하세요."
+                else:
+                    params["system"] = "반드시 JSON 형식으로만 응답하세요."
 
             # API 호출
-            logger.debug(f"Calling OpenAI API: model={self.model}")
-            response = await self.client.chat.completions.create(**params)
+            logger.debug(f"Calling Claude API: model={self.model}")
+            response = await self.client.messages.create(**params)
 
             # 응답 추출
-            content = response.choices[0].message.content
+            content = response.content[0].text
 
             logger.debug(
-                f"OpenAI API response received",
+                f"Claude API response received",
                 extra={
                     "model": self.model,
-                    "tokens": response.usage.total_tokens,
+                    "tokens": response.usage.input_tokens + response.usage.output_tokens,
                     "content_length": len(content)
                 }
             )
 
             return content
 
-        except RateLimitError as e:
-            logger.error(f"OpenAI rate limit exceeded: {e}", exc_info=True)
+        except AnthropicRateLimitError as e:
+            logger.error(f"Claude rate limit exceeded: {e}", exc_info=True)
             raise
-        except OpenAIError as e:
-            logger.error(f"OpenAI API error: {e}", exc_info=True)
+        except AnthropicError as e:
+            logger.error(f"Claude API error: {e}", exc_info=True)
             raise
         except Exception as e:
             logger.error(f"Unexpected error in LLM call: {e}", exc_info=True)
@@ -198,7 +217,7 @@ class LLMService:
 
         Raises:
             json.JSONDecodeError: JSON 파싱 실패 시
-            OpenAIError: API 호출 실패 시
+            AnthropicError: API 호출 실패 시
 
         Example:
             >>> llm = LLMService()
@@ -218,7 +237,16 @@ class LLMService:
                 json_mode=True
             )
 
-            # JSON 파싱
+            # JSON 파싱 (```json 제거)
+            response = response.strip()
+            if response.startswith("```json"):
+                response = response[7:]
+            if response.startswith("```"):
+                response = response[3:]
+            if response.endswith("```"):
+                response = response[:-3]
+            response = response.strip()
+
             result = json.loads(response)
 
             logger.debug(f"JSON response parsed successfully")
@@ -228,6 +256,9 @@ class LLMService:
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON response: {e}", exc_info=True)
             logger.error(f"Raw response: {response}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in call_json: {e}", exc_info=True)
             raise
 
     async def batch_call(
@@ -283,10 +314,10 @@ class LLMService:
 
 
 # ============================================
-# 7. 전역 인스턴스 (선택)
+# 7. 전역 인스턴스
 # ============================================
 
-# 기본 LLM 서비스 인스턴스
+# 기본 LLM 서비스 인스턴스 (Sonnet)
 default_llm_service = LLMService()
 
 
@@ -296,7 +327,8 @@ default_llm_service = LLMService()
 __all__ = [
     "LLMService",
     "default_llm_service",
+    "CLAUDE_MODELS",
 ]
 
 
-logger.info("LLM service module loaded")
+logger.info("LLM service module loaded (Claude Sonnet)")

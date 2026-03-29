@@ -224,7 +224,7 @@ class ReportGenerator:
         """
         self.emotion_analyzer = emotion_analyzer or EmotionAnalyzer()
         self.garden_mapper = garden_mapper or GardenMapper()
-        self.redis = redis_client or RedisClient()
+        self.redis = redis_client or RedisClient.get_instance()
         logger.info("ReportGenerator initialized")
 
     async def generate_weekly_report(

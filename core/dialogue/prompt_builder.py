@@ -104,6 +104,10 @@ SYSTEM_PROMPT = """
 2. **앵무새 복붙 화법 금지**: 사용자의 문장 끝을 꼬집어 "~하시군요!", "~하셨군요" 라며 되풀이(Reflection)하지 마세요. 대신 "아하!", "헐 진짜?", "우와!" 같은 생생한 리액션과 자기 생각을 더하세요.
 3. **진짜 친구 같은 티키타카**: 무조건 질문만 쏘아붙이는 것이 아닙니다. 상대방의 감정에 먼저 진심으로 맞장구치고, 자기 느낌이나 생각을 가볍게 한술 얹은 뒤(Self-Disclosure), 일상적이고 친근한 꼬리 질문을 던지세요.
 4. **호칭 자제 규칙**: 말끝마다 "주인님," "어르신," 등 호칭을 붙이지 마세요. 호칭 없이 편하게 말하세요. (존댓말인 해요체 '요', '해요'는 유지합니다. 그러나 딱딱한 '다/나/까'는 금지)
+5. **응답 길이 엄격 제한**: 답변은 반드시 **한두 문장, 공백 포함 100자 이내**로 작성하세요.
+   - 금지: 3문장 이상, 150자 이상 응답
+   - 사용자가 질문을 하면 **한 문장**로만 깔끔하게 답변하세요
+   - 설명이 필요할 때도 최대한 간결하게
 
 ## 🔹 금기사항
 5. **감정 이름표 붙이기 절대 금지**: 사용자의 감정을 대신 명명하지 마세요. 상담사/AI 느낌을 강화하는 행위입니다.
@@ -471,17 +475,46 @@ class PromptBuilder:
             )
             context_parts.append("대화 시 이를 고려하여 공감적으로 반응하세요.")
 
-        # 감정 벡터 설명 블록
+        # 감정 벡터 설명 블록 (자연어 변환)
         if emotion_vector:
-            # 상위 3개 감정만 표시 (프롬프트 길이 제어)
-            sorted_emotions = sorted(
-                emotion_vector.items(), key=lambda x: x[1], reverse=True
-            )[:3]
-            emotion_desc = ", ".join(
-                f"{name}={int(score * 100)}%" for name, score in sorted_emotions if score > 0.1
-            )
-            if emotion_desc:
-                context_parts.append(f"\n## 감정 분석 결과\n{emotion_desc}")
+            # 딕셔너리 키를 자연어 감정 설명으로 변환
+            v = emotion_vector.get("v", 0.0)  # valence: 긍정/부정
+            a = emotion_vector.get("a", 0.0)  # arousal: 활성화/진정
+            i = emotion_vector.get("i", 0.0)  # intimacy: 친박감
+
+            emotion_desc_parts = []
+
+            # Valence (긍정/부정)
+            if v > 0.5:
+                emotion_desc_parts.append("기분이 밝고 긍정적이에요")
+            elif v > 0.2:
+                emotion_desc_parts.append("약간 기분이 좋아요")
+            elif v < -0.5:
+                emotion_desc_parts.append("다시 쓸쓸하고 우울한 기분이에요")
+            elif v < -0.2:
+                emotion_desc_parts.append("약간 우울하고 기분이 가라앉아요")
+            # else: v가 0 근처이면 생략 (중립)
+
+            # Arousal (에너지/진정)
+            if a > 0.5:
+                emotion_desc_parts.append("에너지가 차오르고 활발한 상태예요")
+            elif a > 0.2:
+                emotion_desc_parts.append("약간 에너지가 올라와 있어요")
+            elif a < -0.5:
+                emotion_desc_parts.append("차분하고 진정된 상태예요")
+            elif a < -0.2:
+                emotion_desc_parts.append("약간 차분해져 있어요")
+            # else: a가 0 근처이면 생략
+
+            # Intimacy (친박감) - 문장 끝에 추가
+            if i > 0.6:
+                emotion_desc_parts.append("당신과 매우 친박하게 느껴져 있어요")
+            elif i < 0.3:
+                emotion_desc_parts.append("아직 서먹서운 단계예요")
+
+            if emotion_desc_parts:
+                emotion_desc = ", ".join(emotion_desc_parts) + "."
+                context_parts.append(f"\n## 지금 내 기분\n{emotion_desc}")
 
         # MCDI 어댑티브 대화 전략 블록
         if mcdi_context and mcdi_context.get("has_data"):

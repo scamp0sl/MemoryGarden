@@ -144,6 +144,42 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Failed to start dialogue scheduler: {e}")
         # 계속 진행 (스케줄러 없이도 수동 대화는 가능)
 
+    # ============================================
+    # Warm-up: 핵심 컴포넌트 미리 로드 (첫 요청 지연 방지)
+    # ============================================
+    try:
+        logger.info("🔥 Warming up core components...")
+
+        # LLM 서비스 워밍 (Claude 연결)
+        from services.llm_service import default_llm_service
+        _ = default_llm_service  # 인스턴스 로드
+        logger.info("  ✓ LLM service loaded")
+
+        # Embedder 워밍 (OpenAI Embedding 연결)
+        from core.nlp.embedder import Embedder
+        _ = Embedder()
+        logger.info("  ✓ Embedder loaded")
+
+        # DialogueManager 워밍
+        from core.dialogue.dialogue_manager import DialogueManager
+        _ = DialogueManager()
+        logger.info("  ✓ DialogueManager loaded")
+
+        # KakaoClient 워밍 (lazy import 방지)
+        from services.kakao_client import KakaoClient
+        _ = KakaoClient
+        logger.info("  ✓ KakaoClient loaded")
+
+        # MemoryManager 워밍
+        from core.memory.memory_manager import MemoryManager
+        _ = MemoryManager()
+        logger.info("  ✓ MemoryManager loaded")
+
+        logger.info("✅ Core components warmed up")
+
+    except Exception as e:
+        logger.warning(f"⚠️ Component warm-up incomplete (will load on demand): {e}")
+
     logger.info("=" * 60)
     logger.info(f"✅ Memory Garden API Started!")
     logger.info(f"   Environment: {settings.APP_ENV}")

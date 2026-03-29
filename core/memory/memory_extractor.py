@@ -357,7 +357,7 @@ class MemoryExtractor:
                         entity=fact["entity"],
                         value=fact["value"],
                         category=self._map_to_entity_category(fact.get("entity")),
-                        fact_type=FactType(fact.get("fact_type", "preference")),
+                        fact_type=self._normalize_fact_type(fact.get("fact_type", "preference")),
                         confidence=float(fact.get("confidence", 0.8)),
                         context=fact.get("context", ""),
                         timestamp=current_datetime.isoformat()
@@ -495,6 +495,56 @@ class MemoryExtractor:
             "health_condition": EntityCategory.HEALTH,
         }
         return entity_mapping.get(entity, EntityCategory.OBJECT)
+
+    def _normalize_fact_type(self, fact_type_str: str) -> FactType:
+        """
+        fact_type 문자열을 FactType enum으로 안전하게 변환
+
+        LLM이 잘못된 fact_type를 반환할 경우 유사한 값으로 매핑.
+
+        Args:
+            fact_type_str: fact_type 문자열
+
+        Returns:
+            FactType enum 값
+        """
+        if not fact_type_str:
+            return FactType.TEMPORARY  # 기본값
+
+        # 소문자로 정규화
+        fact_type_lower = fact_type_str.lower().strip()
+
+        # 직접 매핑 (정확한 이름)
+        try:
+            return FactType(fact_type_lower)
+        except ValueError:
+            pass
+
+        # Fallback 매핑 (LLM이 자주 사용하는 잘못된 값들)
+        fallback_mapping = {
+            "semi_permanent": FactType.SEMI_IMMUTABLE,
+            "semi-permanent": FactType.SEMI_IMMUTABLE,
+            "semi_immutable": FactType.SEMI_IMMUTABLE,
+            "permanent": FactType.IMMUTABLE,
+            "immutable": FactType.IMMUTABLE,
+            "pref": FactType.PREFERENCE,
+            "like": FactType.PREFERENCE,
+            "favorite": FactType.PREFERENCE,
+            "temp": FactType.TEMPORARY,
+            "temporary": FactType.TEMPORARY,
+        }
+
+        if fact_type_lower in fallback_mapping:
+            logger.warning(
+                f"Unknown fact_type '{fact_type_str}' mapped to {fallback_mapping[fact_type_lower].value}"
+            )
+            return fallback_mapping[fact_type_lower]
+
+        # 최종 fallback: temporary (가장 안전한 값)
+        logger.warning(
+            f"Unknown fact_type '{fact_type_str}' defaulting to 'temporary'"
+        )
+        return FactType.TEMPORARY
 
     def _extract_key_entities(
         self,

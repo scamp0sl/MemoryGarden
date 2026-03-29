@@ -11,6 +11,7 @@ Updated: 2026-03-29 (Claude Sonnet로 변경)
 # ============================================
 # 1. Standard Library Imports
 # ============================================
+import asyncio
 import json
 from typing import Optional, Dict, Any, List
 
@@ -201,7 +202,8 @@ class LLMService:
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        max_retries: int = 2
     ) -> Dict[str, Any]:
         """
         JSON 응답 요청
@@ -211,12 +213,13 @@ class LLMService:
             system_prompt: 시스템 프롬프트 (선택)
             temperature: 샘플링 온도
             max_tokens: 최대 토큰 수
+            max_retries: 최대 재시도 횟수 (기본 2)
 
         Returns:
             Dict: 파싱된 JSON 객체
 
         Raises:
-            json.JSONDecodeError: JSON 파싱 실패 시
+            json.JSONDecodeError: JSON 파싱 실패 시 (모든 재시도 후)
             AnthropicError: API 호출 실패 시
 
         Example:
@@ -227,39 +230,86 @@ class LLMService:
             >>> print(result["emotion"])
             "joy"
         """
-        try:
-            # JSON 모드로 호출
-            response = await self.call(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                json_mode=True
-            )
+        for attempt in range(max_retries + 1):
+            try:
+                # JSON 모드로 호출
+                response = await self.call(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=True
+                )
 
-            # JSON 파싱 (```json 제거)
-            response = response.strip()
-            if response.startswith("```json"):
-                response = response[7:]
-            if response.startswith("```"):
-                response = response[3:]
-            if response.endswith("```"):
-                response = response[:-3]
-            response = response.strip()
+                # JSON 파싱 (```json 제거)
+                response = response.strip()
+                if response.startswith("```json"):
+                    response = response[7:]
+                if response.startswith("```"):
+                    response = response[3:]
+                if response.endswith("```"):
+                    response = response[:-3]
+                response = response.strip()
 
-            result = json.loads(response)
+                # 빈 응답 체크 (재시도 전에)
+                if not response or response == "":
+                    logger.warning(f"Empty JSON response on attempt {attempt + 1}")
+                    if attempt < max_retries:
+                        # 더 명확한 지시사항으로 재시도
+                        enhanced_prompt = self._add_json_fallback_instruction(prompt)
+                        enhanced_system = self._add_json_system_instruction(system_prompt)
+                        # 재귀 호출 대신 루프 계속
+                        prompt = enhanced_prompt
+                        system_prompt = enhanced_system
+                        await asyncio.sleep(0.5)  # 짧은 지연
+                        continue
+                    else:
+                        raise json.JSONDecodeError("Empty response after all retries", "", 0)
 
-            logger.debug(f"JSON response parsed successfully")
+                result = json.loads(response)
 
-            return result
+                logger.debug(f"JSON response parsed successfully")
+                return result
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON response: {e}", exc_info=True)
-            logger.error(f"Raw response: {response}")
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error in call_json: {e}", exc_info=True)
-            raise
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"JSON parse failed on attempt {attempt + 1}/{max_retries + 1}: {e}"
+                )
+                logger.warning(f"Raw response (first 200 chars): {response[:200] if response else 'empty'}")
+
+                if attempt < max_retries:
+                    # 프롬프트 강화로 재시도
+                    prompt = self._add_json_fallback_instruction(prompt)
+                    system_prompt = self._add_json_system_instruction(system_prompt)
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.error(f"Failed to parse JSON after {max_retries + 1} attempts")
+                    raise
+
+            except Exception as e:
+                logger.error(f"Unexpected error in call_json: {e}", exc_info=True)
+                raise
+
+    def _add_json_fallback_instruction(self, original_prompt: str) -> str:
+        """JSON 파싱 실패 시 프롬프트 강화"""
+        return f"""{original_prompt}
+
+중요: 반드시 유효한 JSON 형식으로만 응답하세요. 다른 텍스트를 추가하지 마세요.
+예시:
+{{"key": "value"}}
+"""
+
+    def _add_json_system_instruction(self, original_system: Optional[str]) -> str:
+        """시스템 프롬프트에 JSON 지시사항 추가"""
+        base = original_system or ""
+        return f"""{base}
+
+## JSON 출력 강제 규칙
+1. 응답은 반드시 유효한 JSON 객체로만 작성하세요
+2. ```json ``` 마크다운 없이 JSON만 출력하세요
+3. JSON 앞뒤에 아무런 텍스트나 설명을 붙이지 마세요
+4. 빈 JSON {{}} 을 반환하더라도 유효한 형식이어야 합니다
+"""
 
     async def batch_call(
         self,

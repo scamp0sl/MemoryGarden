@@ -1,11 +1,12 @@
 """
 AI 응답 생성기
 
-OpenAI ChatCompletion API를 사용하여
+Anthropic Claude API를 사용하여
 사용자 기억/감정 상태를 반영한 공감적 응답 생성.
 
 Author: Memory Garden Team
 Created: 2025-02-10
+Updated: 2026-03-29 (Claude Sonnet로 변경)
 """
 
 # ============================================
@@ -17,13 +18,13 @@ from datetime import datetime
 # ============================================
 # 2. Third-Party Imports
 # ============================================
-from openai import AsyncOpenAI
 
 # ============================================
 # 3. Local Imports
 # ============================================
 from config.settings import settings
 from core.dialogue.prompt_builder import PromptBuilder
+from services.llm_service import LLMService
 from utils.logger import get_logger
 from utils.exceptions import AnalysisError
 
@@ -35,9 +36,9 @@ logger = get_logger(__name__)
 # ============================================
 # 5. 상수 정의
 # ============================================
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "sonnet-4-6"  # Claude Sonnet 4.6
 DEFAULT_TEMPERATURE = 0.7
-DEFAULT_MAX_TOKENS = 300  # 짧은 응답 권장
+DEFAULT_MAX_TOKENS = 150  # 짧은 응답 권장 (Claude는 GPT보다 긴 응답 생성 경향)
 
 
 # ============================================
@@ -48,25 +49,24 @@ DEFAULT_MAX_TOKENS = 300  # 짧은 응답 권장
 class ResponseGenerator:
     """AI 응답 생성기
 
-    OpenAI ChatCompletion을 사용하여 공감적이고 자연스러운 응답 생성.
+    Anthropic Claude API를 사용하여 공감적이고 자연스러운 응답 생성.
     시스템 프롬프트에 사용자 기억/감정 상태를 주입.
 
     Attributes:
-        client: OpenAI AsyncClient
-        model: 사용할 모델 (기본: gpt-4o-mini)
-        temperature: 생성 온도 (0.0~2.0)
+        llm_service: LLM 서비스 (Claude)
+        temperature: 생성 온도 (0.0~1.0)
         max_tokens: 최대 토큰 수
         prompt_builder: 프롬프트 빌더
 
     Example:
         >>> generator = ResponseGenerator()
         >>> response = await generator.generate(
-        ...     user_message="오늘 점심은 된장찌개 먹었어요",
+        ...     user_message="오늘 점음은 된장찌개 먹었어요",
         ...     conversation_history=[...],
         ...     user_context={...}
         ... )
         >>> print(response)
-        "된장찌개 드셨군요! 🌱 어떤 재료가 들어갔나요?"
+        "된장찌개 드셨군요! 어떤 재료가 들어갔나요?"
     """
 
     def __init__(
@@ -80,19 +80,19 @@ class ResponseGenerator:
         ResponseGenerator 초기화
 
         Args:
-            model: OpenAI 모델명
+            model: Claude 모델명 (sonnet/opus/haiku)
             temperature: 생성 온도 (높을수록 창의적, 낮을수록 일관적)
             max_tokens: 최대 토큰 수
             prompt_builder: 프롬프트 빌더 (None이면 생성)
         """
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        self.llm_service = LLMService(model=model, temperature=temperature, max_tokens=max_tokens)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.prompt_builder = prompt_builder or PromptBuilder()
 
         logger.info(
-            "ResponseGenerator initialized",
+            "ResponseGenerator initialized with Claude",
             extra={
                 "model": model,
                 "temperature": temperature,
@@ -174,26 +174,20 @@ class ResponseGenerator:
                 emotion_vector=emotion_vector
             )
 
-            # 메시지 리스트 구성
-            messages = self._build_messages(
+            # Claude용 프롬프트 구성 (대화 히스토리를 텍스트로 변환)
+            full_prompt = self._build_claude_prompt(
                 system_prompt=system_prompt,
                 conversation_history=conversation_history,
                 user_message=user_message
             )
 
-            # OpenAI API 호출
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
+            # Claude API 호출
+            generated_text = await self.llm_service.call(
+                prompt=full_prompt,
+                system_prompt=system_prompt,
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                top_p=0.9,
-                frequency_penalty=0.5,  # 반복 줄이기
-                presence_penalty=0.3    # 다양성 증가
+                max_tokens=self.max_tokens
             )
-
-            # 응답 추출
-            generated_text = response.choices[0].message.content.strip()
 
             # 다음 질문 추가 (선택)
             if next_question:
@@ -202,8 +196,7 @@ class ResponseGenerator:
             logger.info(
                 "Response generated successfully",
                 extra={
-                    "response_length": len(generated_text),
-                    "tokens_used": response.usage.total_tokens if response.usage else None
+                    "response_length": len(generated_text)
                 }
             )
 
@@ -269,22 +262,20 @@ class ResponseGenerator:
             emotion_vector=emotion_vector  # B2-6
         )
 
-        # 메시지 구성
-        messages = self._build_messages(
+        # Claude용 프롬프트 구성
+        full_prompt = self._build_claude_prompt(
             system_prompt=system_prompt,
             conversation_history=conversation_history,
             user_message=user_message
         )
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
+            generated_text = await self.llm_service.call(
+                prompt=full_prompt,
+                system_prompt=system_prompt,
                 temperature=0.8,  # 감정 대응 시 약간 더 창의적으로
                 max_tokens=self.max_tokens
             )
-
-            generated_text = response.choices[0].message.content.strip()
 
             logger.info(
                 "Empathetic response generated",
@@ -305,6 +296,35 @@ class ResponseGenerator:
     # ============================================
     # Private Helper Methods
     # ============================================
+
+    def _build_claude_prompt(
+        self,
+        system_prompt: str,
+        conversation_history: List[Dict[str, str]],
+        user_message: str
+    ) -> str:
+        """
+        Claude용 프롬프트 구성
+
+        OpenAI ChatCompletion 형식의 conversation_history를
+        Claude가 이해할 수 있는 텍스트 형식으로 변환
+        """
+        parts = []
+
+        # 대화 히스토리를 텍스트로 변환
+        if conversation_history:
+            parts.append("\n## 이전 대화 기록")
+            for msg in conversation_history:
+                if msg["role"] == "user":
+                    parts.append(f"사용자: {msg['content']}")
+                else:
+                    parts.append(f"사만다: {msg['content']}")
+
+        # 현재 사용자 메시지
+        parts.append(f"\n사용자: {user_message}")
+        parts.append("\n위 대화 맥락을 바탕으로 자연스럽게 이어서 답변하세요.")
+
+        return "\n".join(parts)
 
     async def _build_system_prompt(
         self,
@@ -359,31 +379,6 @@ class ResponseGenerator:
 
         return base_prompt + emotion_context
 
-    def _build_messages(
-        self,
-        system_prompt: str,
-        conversation_history: List[Dict[str, str]],
-        user_message: str
-    ) -> List[Dict[str, str]]:
-        """ChatCompletion용 메시지 리스트 구성"""
-        messages = [{"role": "system", "content": system_prompt}]
-
-        # 대화 히스토리 추가
-        messages.extend(conversation_history)
-
-        # 현재 사용자 메시지 추가
-        messages.append({"role": "user", "content": user_message})
-
-        logger.debug(
-            "Messages built",
-            extra={
-                "total_messages": len(messages),
-                "history_turns": len(conversation_history)
-            }
-        )
-
-        return messages
-
     def _translate_emotion(self, emotion_en: str) -> str:
         """영어 감정 레이블을 한국어로 변환"""
         emotion_map = {
@@ -404,4 +399,4 @@ __all__ = [
     "ResponseGenerator",
 ]
 
-logger.info("Response generator module loaded")
+logger.info("Response generator module loaded (Claude Sonnet)")

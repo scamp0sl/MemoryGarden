@@ -8,9 +8,10 @@ AI 응답 생성 + 대화 DB 저장 + MCDI 분석 (백그라운드).
 import asyncio
 import hashlib
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from uuid import UUID
 
 from fastapi import APIRouter, Request, Depends, BackgroundTasks
 from fastapi.responses import RedirectResponse
@@ -278,6 +279,101 @@ async def _analyze_and_reply_image(
 
     except Exception as e:
         logger.error(f"이미지 분석 2턴 플로우 실패: {e}", exc_info=True)
+
+
+async def _generate_and_store_delayed_response(
+    user_id: str,
+    user_message: str,
+    mcdi_context: Optional[Dict[str, Any]],
+    dedup_key: str,
+    selected_category: str,
+    gap_hours: Optional[float]
+) -> None:
+    """
+    백그라운드에서 지연 응답 생성 및 Redis 저장
+
+    4.5초 타임아웃 발생 시 호출되어,
+    실제 AI 응답 생성 후 Redis에 저장.
+    다음 사용자 메시지에서 "준비됐니?" 등으로 확인 시 저장된 응답 전송.
+    """
+    try:
+        dialogue_manager = get_dialogue_manager()
+        start_time = time.time()
+
+        logger.info(
+            f"Starting delayed response generation for {user_id}",
+            extra={"user_id": user_id, "msg_preview": user_message[:30]}
+        )
+
+        # 실제 응답 생성 (타임아웃 없음)
+        ai_response = await dialogue_manager.generate_response(
+            user_id=user_id,
+            user_message=user_message,
+            mcdi_context=mcdi_context
+        )
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+
+        # Gap 메시지가 필요한 경우 추가
+        if gap_hours and gap_hours >= 2.0:
+            from core.dialogue.time_aware import TimeAwareDialogue
+            time_aware = TimeAwareDialogue()
+            gap_message = time_aware.generate_combined_message(gap_hours)
+            ai_response = f"{gap_message}\n\n{ai_response}"
+
+        # Redis에 저장 (다음 요청 시 전송)
+        pending_response_key = f"pending_response:{user_id}"
+        pending_data = {
+            "response": ai_response,
+            "original_message": user_message,
+            "latency_ms": elapsed_ms,
+            "category": selected_category,
+            "created_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat()
+        }
+
+        # 30분 TTL (사용자가 30분 내에 다시 말을 걸면 저장된 응답 전송)
+        await redis_client.set_json(pending_response_key, pending_data, ttl=1800)
+
+        # 대화 DB 저장
+        async with AsyncSessionLocal() as db:
+            from database.models import User, Conversation
+            result = await db.execute(
+                select(User.id).where(User.id == UUID(user_id))
+            )
+            user_uuid = result.scalar_one_or_none()
+            if user_uuid:
+                conv = Conversation(
+                    user_id=user_uuid,
+                    message=user_message,
+                    response=ai_response,
+                    message_type="text",
+                    response_latency_ms=elapsed_ms,
+                    category=selected_category
+                )
+                db.add(conv)
+                await db.commit()
+
+        # 세션 업데이트
+        await dialogue_manager.add_turn(
+            user_id=user_id,
+            user_message=user_message,
+            assistant_message=ai_response,
+            metadata={"response_latency_ms": elapsed_ms, "category": selected_category, "pending": True}
+        )
+
+        # 중복 방지 마킹 해제 (이제 다른 메시지 받을 수 있음)
+        await redis_client.delete(dedup_key)
+
+        logger.info(
+            f"Delayed response stored for {user_id}",
+            extra={"user_id": user_id, "response_length": len(ai_response), "elapsed_ms": elapsed_ms}
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Failed to generate/store delayed response for {user_id}: {e}",
+            exc_info=True
+        )
 
 
 async def _run_mcdi_analysis(
@@ -994,6 +1090,49 @@ async def kakao_webhook(
         if is_new_user:
             background_tasks.add_task(_register_user_schedule, user_id)
 
+        # ── 2.5. 대기 중인 응답 확인 (4.5초 타임아웃 후 저장된 응답) ────────
+        # 사용자가 "준비됐니?", "다시 말해봐" 등으로 물었을 때 이전에 저장된 응답 전송
+        if not is_new_user and user.onboarding_day > 0:  # 온보딩 완료된 사용자만
+            pending_response_key = f"pending_response:{user_id}"
+            pending_data = await redis_client.get_json(pending_response_key)
+
+            if pending_data:
+                # 저장된 응답이 있으면 즉시 반환
+                stored_response = pending_data.get("response", "")
+                stored_message = pending_data.get("original_message", "")
+
+                # Redis에서 삭제 (일회용)
+                await redis_client.delete(pending_response_key)
+
+                # 대화 저장
+                dialogue_manager = get_dialogue_manager()
+                await dialogue_manager.add_turn(
+                    user_id=user_id,
+                    user_message=utterance,  # 현재 메시지 ("준비됐니?" 등)
+                    assistant_message=stored_response,
+                    metadata={"pending_response": True, "original_message": stored_message}
+                )
+
+                # DB 저장
+                conversation = Conversation(
+                    user_id=user.id,
+                    message=utterance,
+                    response=stored_response,
+                    message_type="text",
+                    category="delayed_response",
+                    response_latency_ms=pending_data.get("latency_ms", 0)
+                )
+                db.add(conversation)
+                await db.commit()
+
+                logger.info(
+                    f"Pending response delivered for {user_id}",
+                    extra={"user_id": user_id, "response_length": len(stored_response)}
+                )
+
+                return _build_kakao_response(stored_response)
+        # ====================================================================
+
         # ── 2.4. 채널 전용 사용자 → OAuth 로그인 유도 ──────────────────
         # OAuth 토큰이 없는 채널 사용자가 스케줄 메시지를 받으려면 로그인 필요
         if not is_new_user and not user.kakao_access_token and user.kakao_channel_user_key:
@@ -1236,11 +1375,54 @@ async def kakao_webhook(
                     )
             # ============================================================
 
-            ai_response = await dialogue_manager.generate_response(
-                user_id=user_id,
-                user_message=user_message_for_save,
-                mcdi_context=mcdi_context  # 어댑티브 대화 블록 생성용
-            )
+            # ========== 카카오 5초 타임아웃 방지: 4.5초 내 응답 ==========
+            try:
+                # 4.5초 타임아웃으로 응답 생성 시도
+                ai_response = await asyncio.wait_for(
+                    dialogue_manager.generate_response(
+                        user_id=user_id,
+                        user_message=user_message_for_save,
+                        mcdi_context=mcdi_context
+                    ),
+                    timeout=4.5
+                )
+                response_completed = True
+                logger.debug(
+                    f"Response generated within timeout",
+                    extra={"user_id": user_id, "response_length": len(ai_response)}
+                )
+            except asyncio.TimeoutError:
+                # 4.5초 초과: "생각 중" 메시지 즉시 반환, 실제 응답은 백그라운드로 생성
+                logger.warning(
+                    f"Response generation timeout (>4.5s) for {user_id}, sending holding message"
+                )
+                holding_message = "네, 생각하고 있는 중이에요! 조금만 기다려 주세요 ㅎㅎ"
+                response_completed = False
+
+                # 즉시 "생각 중" 응답 반환 (타임아웃 방지)
+                # 백그라운드 태스크로 실제 응답 생성 및 Redis 저장
+                background_tasks.add_task(
+                    _generate_and_store_delayed_response,
+                    user_id=user_id,
+                    user_message=user_message_for_save,
+                    mcdi_context=mcdi_context,
+                    dedup_key=dedup_key,  # 중복 체크 키 전달 (지우지 않음)
+                    selected_category=selected_category,
+                    gap_hours=await dialogue_manager.get_hours_since_last_interaction(user_id) if dialogue_manager else None
+                )
+
+                # "생각 중" 메시지를 대화 DB에도 기록
+                await dialogue_manager.add_turn(
+                    user_id=user_id,
+                    user_message=user_message_for_save,
+                    assistant_message=holding_message,
+                    metadata={"response_latency_ms": 4500, "category": selected_category, "holding": True}
+                )
+
+                # 즉시 반환 (백그라운드에서 실제 응답 전송)
+                return _build_kakao_response(holding_message)
+            # ====================================================================
+
             conv_mode = await dialogue_manager.get_last_conversation_mode(user_id)
 
             # ========== B4-1: Gap 메시지 접두사 추가 (2시간 이상 경과 시) ==========

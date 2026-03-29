@@ -1172,7 +1172,10 @@ async def kakao_webhook(
                 # 퀴즈 답변 평가 완료 후 sent 플래그 제거 (재평가 방지)
                 if is_quiz_answer or quiz_feedback:
                     await redis_client.delete(quiz_sent_key)
-                    logger.info(f"Quiz evaluation completed, sent flag removed for {user_id}")
+
+                    # 퀴즈 완료 후 회상 문맥 제거 (계속된 회상 질문 방지)
+                    await dialogue_manager.update_context(user_id, {"quiz_completed": True})
+                    logger.info(f"Quiz evaluation completed, context marked for {user_id}")
 
                 if is_quiz_answer and quiz_feedback:
                     # 퀴즈 피드백을 AI 응답 앞에 추가

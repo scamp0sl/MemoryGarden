@@ -1162,12 +1162,17 @@ async def kakao_webhook(
             quiz_sent_key = f"evening_quiz_sent:{user_id}:{today_str}"
             quiz_cache_key = f"evening_quiz_cache:{user_id}:{today_str}"
 
-            # 퀴즈를 보냈으면 답변 평가 시도
+            # 퀴즈를 보냈으면 답변 평가 시도 (1회만)
             if await redis_client.exists(quiz_sent_key):
                 is_quiz_answer, quiz_feedback, rt_adjustment = await _evaluate_quiz_answer(
                     user_id=user_id,
                     user_answer=user_message_for_save
                 )
+
+                # 퀴즈 답변 평가 완료 후 sent 플래그 제거 (재평가 방지)
+                if is_quiz_answer or quiz_feedback:
+                    await redis_client.delete(quiz_sent_key)
+                    logger.info(f"Quiz evaluation completed, sent flag removed for {user_id}")
 
                 if is_quiz_answer and quiz_feedback:
                     # 퀴즈 피드백을 AI 응답 앞에 추가
@@ -1184,8 +1189,7 @@ async def kakao_webhook(
                             rt_adjustment=rt_adjustment
                         )
 
-                    # 퀴즈 캐시 삭제 (평가 완료)
-                    await redis_client.delete(quiz_cache_key)
+                # 퀴즈 캐시는 _evaluate_quiz_answer 내부에서 삭제됨
             # =============================================
 
             # HIGH-2: 카테고리 선택 (약한 지표 우선, 주간 빈도 제한 적용)

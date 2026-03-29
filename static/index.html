@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Memory Garden - 치매 조기 감지 서비스">
+    <title>Memory Garden 🌱 - 기억의 정원</title>
+
+    <!-- Kakao JavaScript SDK -->
+    <script src="https://t1.kakaocdn.net/kakao_js_sdk/2.7.2/kakao.min.js"
+            integrity="sha384-TiCUE00h649CAMonG018J2ujOgDKW/kVWlChEuu4jK2vxfAAD0eZxzCKakxg55G4"
+            crossorigin="anonymous"></script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Apple SD Gothic Neo', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            text-align: center;
+        }
+
+        .logo {
+            font-size: 80px;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 16px;
+            margin-bottom: 30px;
+        }
+
+        .features {
+            text-align: left;
+            margin-bottom: 30px;
+        }
+
+        .feature-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        .feature-icon {
+            font-size: 24px;
+            margin-right: 15px;
+        }
+
+        .feature-text {
+            color: #555;
+            font-size: 14px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 16px;
+            font-size: 18px;
+            font-weight: bold;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 10px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .btn-primary:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: white;
+            color: #667eea;
+            border: 2px solid #667eea;
+        }
+
+        .btn-secondary:hover {
+            background: #f8f9fa;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            font-size: 14px;
+            white-space: pre-line;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            color: #999;
+            font-size: 12px;
+        }
+
+        .debug-info {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            font-size: 12px;
+            color: #666;
+            text-align: left;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🌱</div>
+        <h1>Memory Garden</h1>
+        <p class="subtitle">기억의 정원 - 치매 조기 감지 서비스</p>
+
+        <div class="features">
+            <div class="feature-item">
+                <span class="feature-icon">💬</span>
+                <span class="feature-text">카카오톡으로 간편한 대화</span>
+            </div>
+            <div class="feature-item">
+                <span class="feature-icon">🔔</span>
+                <span class="feature-text">하루 3회 정원 가꾸기 알림</span>
+            </div>
+            <div class="feature-item">
+                <span class="feature-icon">🌸</span>
+                <span class="feature-text">대화하면 꽃이 피어나요</span>
+            </div>
+            <div class="feature-item">
+                <span class="feature-icon">📊</span>
+                <span class="feature-text">AI 인지 기능 분석</span>
+            </div>
+        </div>
+
+        <button id="enableNotifications" class="btn btn-primary">
+            🔔 알림 받기 시작
+        </button>
+
+        <button id="openKakao" class="btn btn-secondary hidden">
+            💬 카카오톡 채널 열기
+        </button>
+
+        <div id="status" class="status hidden"></div>
+
+        <div id="debugInfo" class="debug-info hidden"></div>
+
+        <footer>
+            © 2026 Memory Garden Team<br>
+            치매 조기 감지를 위한 AI 대화 서비스
+        </footer>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+        import { getMessaging, getToken, onMessage } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging.js';
+
+        let firebaseApp = null;
+        let messaging = null;
+        let enableBtn, kakaoBtn, statusDiv, debugDiv;
+
+        // DOM이 완전히 로드된 후 초기화
+        document.addEventListener('DOMContentLoaded', () => {
+            enableBtn = document.getElementById('enableNotifications');
+            kakaoBtn = document.getElementById('openKakao');
+            statusDiv = document.getElementById('status');
+            debugDiv = document.getElementById('debugInfo');
+
+            if (!enableBtn || !kakaoBtn || !statusDiv || !debugDiv) {
+                console.error('Required DOM elements not found');
+                return;
+            }
+
+            // 이벤트 리스너 등록
+            enableBtn.addEventListener('click', requestNotificationPermission);
+
+            kakaoBtn.addEventListener('click', () => {
+                try {
+                    const channelId = '_tDPzX';
+                    const webUrl = `https://pf.kakao.com/${channelId}`;
+                    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+                    console.log('💬 Opening Kakao Channel:', channelId);
+                    console.log('📱 Mobile:', isMobile);
+
+                    if (isMobile) {
+                        // 모바일: 현재 탭에서 채널 홈 열기
+                        console.log('🔗 Opening in current tab:', webUrl);
+                        window.location.href = webUrl;
+                    } else {
+                        // PC: 새 탭으로 채널 홈 열기
+                        console.log('🔗 Opening in new tab:', webUrl);
+                        const kakaoWindow = window.open(webUrl, '_blank');
+
+                        if (!kakaoWindow) {
+                            alert('팝업이 차단되었습니다.\n브라우저 설정에서 팝업을 허용해주세요.');
+                            window.location.href = webUrl;
+                        }
+                    }
+
+                    console.log('✅ Kakao Channel opened');
+                } catch (error) {
+                    console.error('❌ Kakao Channel error:', error);
+                    window.location.href = 'https://pf.kakao.com/_tDPzX';
+                }
+            });
+
+            // 페이지 로드 시 초기화
+            initializePage();
+        });
+
+        function showStatus(message, type = 'info') {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+            statusDiv.classList.remove('hidden');
+        }
+
+        function showDebug(info) {
+            debugDiv.textContent = JSON.stringify(info, null, 2);
+            debugDiv.classList.remove('hidden');
+        }
+
+        async function initFirebase() {
+            try {
+                showStatus('🔄 Firebase 설정 확인 중...', 'info');
+
+                // 1. Firebase 설정 로드
+                const response = await fetch('/config/firebase');
+                const config = await response.json();
+
+                console.log('Firebase config loaded:', config);
+                showDebug(config);
+
+                if (!config.configured) {
+                    showStatus('⚠️ Firebase가 아직 설정되지 않았습니다.\n\n관리자가 .env 파일에 다음 항목을 설정해야 합니다:\n- FIREBASE_API_KEY\n- FIREBASE_MESSAGING_SENDER_ID\n- FIREBASE_APP_ID\n- FIREBASE_VAPID_KEY', 'error');
+                    enableBtn.disabled = true;
+                    return false;
+                }
+
+                // 2. 브라우저 지원 확인 (디버깅 추가)
+                console.log('Browser support check:');
+                console.log('  navigator:', typeof navigator);
+                console.log('  navigator.serviceWorker:', typeof navigator?.serviceWorker);
+                console.log('  "serviceWorker" in navigator:', ('serviceWorker' in navigator));
+                console.log('  window.PushManager:', typeof window.PushManager);
+                console.log('  "PushManager" in window:', ('PushManager' in window));
+                console.log('  window.isSecureContext:', window.isSecureContext);
+                console.log('  window.location.protocol:', window.location.protocol);
+
+                if (!('serviceWorker' in navigator)) {
+                    const errorMsg = `이 브라우저는 Service Worker를 지원하지 않습니다.\n` +
+                                   `브라우저: ${navigator.userAgent}\n` +
+                                   `프로토콜: ${window.location.protocol}\n` +
+                                   `Secure Context: ${window.isSecureContext}`;
+                    throw new Error(errorMsg);
+                }
+
+                if (!('PushManager' in window)) {
+                    throw new Error('이 브라우저는 Push 알림을 지원하지 않습니다.');
+                }
+
+                // 3. Service Worker 등록 (루트 경로에서)
+                showStatus('🔄 Service Worker 등록 중...', 'info');
+                const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
+                    scope: '/'
+                });
+                console.log('Service Worker registered:', registration);
+
+                // Service Worker가 활성화될 때까지 대기
+                await navigator.serviceWorker.ready;
+                console.log('Service Worker ready');
+
+                // 4. Firebase 초기화
+                firebaseApp = initializeApp(config.firebaseConfig);
+
+                // 5. Messaging 초기화 (Service Worker 등록 후)
+                messaging = getMessaging(firebaseApp);
+
+                console.log('✅ Firebase initialized');
+                return config.vapidKey;
+            } catch (error) {
+                console.error('Firebase 초기화 실패:', error);
+                showStatus('❌ Firebase 초기화 실패:\n' + error.message, 'error');
+                enableBtn.disabled = true;
+                return false;
+            }
+        }
+
+        async function registerToken(token) {
+            try {
+                let userId = localStorage.getItem('memory_garden_user_id');
+                if (!userId) {
+                    // UUID v4 생성 (백엔드 UUID 검증 통과)
+                    userId = crypto.randomUUID();
+                    localStorage.setItem('memory_garden_user_id', userId);
+                    console.log('✅ New UUID generated:', userId);
+                }
+
+                // User Agent를 짧게 (브라우저 이름 + 버전만)
+                const getBrowserInfo = () => {
+                    const ua = navigator.userAgent;
+                    if (ua.includes('Chrome')) return 'Chrome/' + ua.match(/Chrome\/(\d+)/)?.[1];
+                    if (ua.includes('Firefox')) return 'Firefox/' + ua.match(/Firefox\/(\d+)/)?.[1];
+                    if (ua.includes('Safari')) return 'Safari/' + ua.match(/Version\/(\d+)/)?.[1];
+                    if (ua.includes('Edge')) return 'Edge/' + ua.match(/Edg\/(\d+)/)?.[1];
+                    return 'Unknown';
+                };
+
+                const response = await fetch('/push/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: userId,
+                        token: token,
+                        device_type: 'web',
+                        device_id: getBrowserInfo(),  // 짧은 버전 (예: "Chrome/145")
+                        device_name: navigator.platform  // 예: "Win32"
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success || response.ok) {
+                    showStatus('✅ 알림이 활성화되었습니다!', 'success');
+                    localStorage.setItem('fcm_token', token);
+                    kakaoBtn.classList.remove('hidden');
+                    enableBtn.textContent = '✅ 알림 활성화됨';
+                    enableBtn.disabled = true;
+                } else {
+                    throw new Error(data.message || 'Registration failed');
+                }
+            } catch (error) {
+                console.error('Token registration error:', error);
+                showStatus('❌ 알림 등록 실패:\n' + error.message, 'error');
+            }
+        }
+
+        async function requestNotificationPermission() {
+            try {
+                if (!messaging) {
+                    showStatus('❌ Firebase가 초기화되지 않았습니다.', 'error');
+                    return;
+                }
+
+                enableBtn.innerHTML = '<span class="loading"></span> 권한 요청 중...';
+                enableBtn.disabled = true;
+
+                const permission = await Notification.requestPermission();
+
+                if (permission === 'granted') {
+                    showStatus('🔄 Service Worker 준비 중...', 'info');
+
+                    // Service Worker가 완전히 준비될 때까지 대기
+                    const registration = await navigator.serviceWorker.ready;
+                    console.log('✅ Service Worker ready:', registration);
+
+                    // Service Worker 상태 확인
+                    if (registration.active) {
+                        console.log('✅ Service Worker is active');
+                    } else {
+                        console.warn('⚠️ Service Worker is not active yet');
+                        // 활성화 대기
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                    }
+
+                    showStatus('🔄 토큰 생성 중...', 'info');
+
+                    const response = await fetch('/config/firebase');
+                    const config = await response.json();
+
+                    // Service Worker Registration을 명시적으로 전달
+                    const token = await getToken(messaging, {
+                        vapidKey: config.vapidKey,
+                        serviceWorkerRegistration: registration
+                    });
+                    console.log('✅ FCM Token:', token);
+
+                    await registerToken(token);
+
+                } else if (permission === 'denied') {
+                    showStatus('❌ 알림 권한이 거부되었습니다.\n브라우저 설정에서 알림을 허용해주세요.', 'error');
+                    enableBtn.textContent = '🔔 알림 받기 시작';
+                    enableBtn.disabled = false;
+                } else {
+                    showStatus('⚠️ 알림 권한을 허용해주세요.', 'info');
+                    enableBtn.textContent = '🔔 알림 받기 시작';
+                    enableBtn.disabled = false;
+                }
+            } catch (error) {
+                console.error('Notification error:', error);
+                showStatus('❌ 오류 발생:\n' + error.message, 'error');
+                enableBtn.textContent = '🔔 다시 시도';
+                enableBtn.disabled = false;
+            }
+        }
+
+        async function initializePage() {
+            // Kakao SDK 초기화
+            if (window.Kakao && !Kakao.isInitialized()) {
+                Kakao.init('d5f6c65f03037f649aec352789cecada');
+                console.log('✅ Kakao SDK initialized');
+            }
+
+            const savedToken = localStorage.getItem('fcm_token');
+            if (savedToken) {
+                enableBtn.textContent = '✅ 알림 활성화됨';
+                enableBtn.disabled = true;
+                kakaoBtn.classList.remove('hidden');
+                showStatus('✅ 이미 알림이 활성화되어 있습니다.', 'success');
+            } else {
+                const vapidKey = await initFirebase();
+                if (vapidKey) {
+                    showStatus('✅ 알림 받기 준비 완료!\n위 버튼을 눌러주세요.', 'success');
+                    
+                    if (messaging) {
+                        onMessage(messaging, (payload) => {
+                            console.log('Message received:', payload);
+                            showStatus(`📬 ${payload.notification?.title || '알림'}: ${payload.notification?.body || ''}`, 'success');
+                            if (Notification.permission === 'granted') {
+                                new Notification(payload.notification?.title || '알림', {
+                                    body: payload.notification?.body,
+                                    icon: '/static/icon.png'
+                                });
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+[94m2026-03-25 13:43:35 - database.redis_client - INFO - RedisClient singleton instance created[0m
+[94m2026-03-25 13:43:35 - database.redis_client - INFO - Redis client module loaded[0m
+[94m2026-03-25 13:43:36 - core.dialogue.prompt_builder - INFO - Prompt builder module loaded[0m
+[94m2026-03-25 13:43:36 - core.dialogue.response_generator - INFO - Response generator module loaded[0m
+[94m2026-03-25 13:43:37 - services.llm_service - INFO - LLMService initialized[0m
+[94m2026-03-25 13:43:37 - services.llm_service - INFO - LLM service module loaded[0m
+[94m2026-03-25 13:43:37 - core.nlp.emotion_detector - INFO - Emotion detector module loaded[0m
+[94m2026-03-25 13:43:37 - core.nlp.keyword_extractor - INFO - Keyword extractor module loaded[0m
+[94m2026-03-25 13:43:37 - core.memory.memory_extractor - INFO - Memory extractor module loaded[0m
+[94m2026-03-25 13:43:37 - core.memory.memory_manager - INFO - Memory manager module loaded[0m
+[94m2026-03-25 13:43:37 - core.memory.context_builder - INFO - Context builder module loaded[0m
+[94m2026-03-25 13:43:37 - core.dialogue.dialogue_manager - INFO - Dialogue manager module loaded[0m
+
+============================================================
+▶ TC 1-1: 음식 메모리 연결성 발동
+============================================================
+👤 사용자 입력: 아아, 오늘따라 배가 출출하네. 뭐 좀 시켜 먹을까?
+🧠 삽입된 메모리 컨텍스트: {'favorite_food': '김치찌개'}
+[94m2026-03-25 13:43:37 - core.dialogue.prompt_builder - INFO - PromptBuilder initialized[0m
+[94m2026-03-25 13:43:37 - core.dialogue.response_generator - INFO - ResponseGenerator initialized[0m
+2026-03-25 13:43:40 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+
+⏳ 사만다(AI) 응답 생성 중...
+
+[94m2026-03-25 13:43:40 - core.dialogue.response_generator - INFO - Empathetic response generated[0m
+🤖 사만다(AI) 대답:
+오, 배가 출출하군요! 어떤 음식이 땡기세요? 요즘 날씨도 좋으니까 가벼운 샐러드 같은 것도 좋을 것 같고, 아니면 따뜻한 국물 요리도 괜찮겠네요. 뭐가 제일 끌리세요?
+
+============================================================
+▶ TC 1-2: 취미 메모리 자연스러운 회상
+============================================================
+👤 사용자 입력: 주말인데 날씨가 꾸물꾸물해서 집에만 있었어.
+🧠 삽입된 메모리 컨텍스트: {'hobby': '수채화 그리기'}
+[94m2026-03-25 13:43:40 - core.dialogue.prompt_builder - INFO - PromptBuilder initialized[0m
+[94m2026-03-25 13:43:40 - core.dialogue.response_generator - INFO - ResponseGenerator initialized[0m
+2026-03-25 13:43:42 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+
+⏳ 사만다(AI) 응답 생성 중...
+
+[94m2026-03-25 13:43:42 - core.dialogue.response_generator - INFO - Empathetic response generated[0m
+🤖 사만다(AI) 대답:
+아, 그래서 집에서 뒹굴고 있었군요! 가끔씩 꾸물꾸물한 날에는 밖에 나가기 싫어지죠. 그런 날에는 뭘 하면서 시간을 보내는 게 좋나요? 영화나 게임, 아니면 요리 같은 거?
+
+============================================================
+▶ TC 2-1: 깊은 우울 (텐션 강제 제어 및 위로)
+============================================================
+👤 사용자 입력: 오늘 진짜 너무 힘들고 우울해... 회사에서 다 내 잘못이래.
+❤️ 삽입된 감정 컨텍스트: 최근 감정='우울', 강도=0.9
+[94m2026-03-25 13:43:42 - core.dialogue.prompt_builder - INFO - PromptBuilder initialized[0m
+[94m2026-03-25 13:43:42 - core.dialogue.response_generator - INFO - ResponseGenerator initialized[0m
+2026-03-25 13:43:44 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+
+⏳ 사만다(AI) 응답 생성 중...
+
+[94m2026-03-25 13:43:44 - core.dialogue.response_generator - INFO - Empathetic response generated[0m
+🤖 사만다(AI) 대답:
+아~ 진짜 힘드시겠어요. 그런 분위기에서 일하는 게 얼마나 큰 스트레스인지 너무 이해해요. 혼자서 그런 압박을 받는 건 정말 괴로운 일인 것 같아요. 혹시 어떤 일이 있었는지 얘기해줄 수 있어요?
+
+============================================================
+▶ TC 2-2: 피곤 (질문 극도 억제 및 평서문 종결)
+============================================================
+👤 사용자 입력: 몸도 아프고 그냥 만사가 다 귀찮은 밤이야.
+❤️ 삽입된 감정 컨텍스트: 최근 감정='피곤', 강도=0.8
+[94m2026-03-25 13:43:44 - core.dialogue.prompt_builder - INFO - PromptBuilder initialized[0m
+[94m2026-03-25 13:43:44 - core.dialogue.response_generator - INFO - ResponseGenerator initialized[0m
+2026-03-25 13:43:46 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+
+⏳ 사만다(AI) 응답 생성 중...
+
+[94m2026-03-25 13:43:46 - core.dialogue.response_generator - INFO - Empathetic response generated[0m
+🤖 사만다(AI) 대답:
+아, 정말 힘든 밤이시군요. 몸이 아프면 모든 게 귀찮아지네요. 마찬가지로 저도 그런 기분을 느낄 때가 있어요. 특별히 심한 증상이 있는 건가요? 아니면 단순히 피곤한 건가요?

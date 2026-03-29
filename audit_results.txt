@@ -1,0 +1,89 @@
+[94m2026-03-18 11:28:58 - database.postgres - INFO - Database engine created[0m
+[94m2026-03-18 11:28:58 - database.postgres - INFO - AsyncSessionLocal factory created[0m
+[94m2026-03-18 11:28:58 - database.redis_client - INFO - RedisClient singleton instance created[0m
+[94m2026-03-18 11:28:58 - database.redis_client - INFO - Redis client module loaded[0m
+[94m2026-03-18 11:28:59 - services.llm_service - INFO - LLMService initialized[0m
+[94m2026-03-18 11:28:59 - services.llm_service - INFO - LLM service module loaded[0m
+[94m2026-03-18 11:28:59 - core.nlp.emotion_detector - INFO - Emotion detector module loaded[0m
+[94m2026-03-18 11:28:59 - core.nlp.keyword_extractor - INFO - Keyword extractor module loaded[0m
+
+============================================================
+🔍 Auditing User: e3c61f48-509b-4ef8-a88a-651ea9467e34
+============================================================
+2026-03-18 11:28:59,729 INFO sqlalchemy.engine.Engine select pg_catalog.version()
+2026-03-18 11:28:59,729 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-03-18 11:28:59,740 INFO sqlalchemy.engine.Engine select current_schema()
+2026-03-18 11:28:59,740 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-03-18 11:28:59,742 INFO sqlalchemy.engine.Engine show standard_conforming_strings
+2026-03-18 11:28:59,742 INFO sqlalchemy.engine.Engine [raw sql] ()
+2026-03-18 11:28:59,744 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-03-18 11:28:59,776 INFO sqlalchemy.engine.Engine SELECT users.id, users.kakao_id, users.name, users.birth_date, users.gender, users.phone, users.email, users.garden_name, users.onboarding_day, users.last_interaction_at, users.baseline_mcdi, users.baseline_established_at, users.kakao_access_token, users.kakao_refresh_token, users.kakao_token_expires_at, users.kakao_refresh_token_expires_at, users.kakao_channel_user_key, users.created_at, users.updated_at, users.deleted_at 
+FROM users 
+WHERE users.id = $1::UUID
+2026-03-18 11:28:59,776 INFO sqlalchemy.engine.Engine [generated in 0.00023s] (UUID('e3c61f48-509b-4ef8-a88a-651ea9467e34'),)
+Name: OAuth User (Day 5)
+Kakao ID: merged_e3c61f48-509b-4ef8-a88a-651ea9467e34
+Created At: 2026-03-13 17:59:36.878152
+2026-03-18 11:28:59,785 INFO sqlalchemy.engine.Engine SELECT count(*) AS count_1 
+FROM conversations 
+WHERE conversations.user_id = $1::UUID
+2026-03-18 11:28:59,785 INFO sqlalchemy.engine.Engine [generated in 0.00020s] (UUID('e3c61f48-509b-4ef8-a88a-651ea9467e34'),)
+Conversation Count: 0
+2026-03-18 11:28:59,788 INFO sqlalchemy.engine.Engine SELECT count(*) AS count_1 
+FROM analysis_results 
+WHERE analysis_results.user_id = $1::UUID
+2026-03-18 11:28:59,788 INFO sqlalchemy.engine.Engine [generated in 0.00020s] (UUID('e3c61f48-509b-4ef8-a88a-651ea9467e34'),)
+Analysis Results: 0
+2026-03-18 11:28:59,792 INFO sqlalchemy.engine.Engine SELECT garden_status.user_id, garden_status.flower_count, garden_status.butterfly_count, garden_status.consecutive_days, garden_status.total_conversations, garden_status.garden_level, garden_status.last_interaction_at, garden_status.season_badge, garden_status.updated_at 
+FROM garden_status 
+WHERE garden_status.user_id = $1::UUID
+2026-03-18 11:28:59,792 INFO sqlalchemy.engine.Engine [generated in 0.00020s] (UUID('e3c61f48-509b-4ef8-a88a-651ea9467e34'),)
+Garden: No record
+2026-03-18 11:28:59,844 INFO sqlalchemy.engine.Engine SELECT count(*) AS count_1 
+FROM memory_events 
+WHERE memory_events.user_id = $1::UUID
+2026-03-18 11:28:59,844 INFO sqlalchemy.engine.Engine [generated in 0.00030s] (UUID('e3c61f48-509b-4ef8-a88a-651ea9467e34'),)
+Memory Events (Audit): 0
+2026-03-18 11:28:59,847 INFO sqlalchemy.engine.Engine ROLLBACK
+[94m2026-03-18 11:28:59 - database.redis_client - INFO - Redis client connected[0m
+Redis Schedule: Not found
+Redis Bio Facts: 0 entries
+Qdrant episodic_memory: 0 points
+Qdrant biographical_memory: 0 points
+
+============================================================
+🔍 Auditing User: 1828534c-7a0f-41e8-ba0b-a0a057738f44
+============================================================
+2026-03-18 11:28:59,879 INFO sqlalchemy.engine.Engine BEGIN (implicit)
+2026-03-18 11:28:59,880 INFO sqlalchemy.engine.Engine SELECT users.id, users.kakao_id, users.name, users.birth_date, users.gender, users.phone, users.email, users.garden_name, users.onboarding_day, users.last_interaction_at, users.baseline_mcdi, users.baseline_established_at, users.kakao_access_token, users.kakao_refresh_token, users.kakao_token_expires_at, users.kakao_refresh_token_expires_at, users.kakao_channel_user_key, users.created_at, users.updated_at, users.deleted_at 
+FROM users 
+WHERE users.id = $1::UUID
+2026-03-18 11:28:59,880 INFO sqlalchemy.engine.Engine [cached since 0.1036s ago] (UUID('1828534c-7a0f-41e8-ba0b-a0a057738f44'),)
+Name: Channel User (Day 13)
+Kakao ID: TEST_KID_1
+Created At: 2026-03-13 17:59:36.878158
+2026-03-18 11:28:59,881 INFO sqlalchemy.engine.Engine SELECT count(*) AS count_1 
+FROM conversations 
+WHERE conversations.user_id = $1::UUID
+2026-03-18 11:28:59,882 INFO sqlalchemy.engine.Engine [cached since 0.09668s ago] (UUID('1828534c-7a0f-41e8-ba0b-a0a057738f44'),)
+Conversation Count: 0
+2026-03-18 11:28:59,883 INFO sqlalchemy.engine.Engine SELECT count(*) AS count_1 
+FROM analysis_results 
+WHERE analysis_results.user_id = $1::UUID
+2026-03-18 11:28:59,883 INFO sqlalchemy.engine.Engine [cached since 0.09501s ago] (UUID('1828534c-7a0f-41e8-ba0b-a0a057738f44'),)
+Analysis Results: 0
+2026-03-18 11:28:59,884 INFO sqlalchemy.engine.Engine SELECT garden_status.user_id, garden_status.flower_count, garden_status.butterfly_count, garden_status.consecutive_days, garden_status.total_conversations, garden_status.garden_level, garden_status.last_interaction_at, garden_status.season_badge, garden_status.updated_at 
+FROM garden_status 
+WHERE garden_status.user_id = $1::UUID
+2026-03-18 11:28:59,885 INFO sqlalchemy.engine.Engine [cached since 0.09287s ago] (UUID('1828534c-7a0f-41e8-ba0b-a0a057738f44'),)
+Garden: No record
+2026-03-18 11:28:59,886 INFO sqlalchemy.engine.Engine SELECT count(*) AS count_1 
+FROM memory_events 
+WHERE memory_events.user_id = $1::UUID
+2026-03-18 11:28:59,886 INFO sqlalchemy.engine.Engine [cached since 0.04152s ago] (UUID('1828534c-7a0f-41e8-ba0b-a0a057738f44'),)
+Memory Events (Audit): 0
+2026-03-18 11:28:59,887 INFO sqlalchemy.engine.Engine ROLLBACK
+Redis Schedule: Not found
+Redis Bio Facts: 0 entries
+Qdrant episodic_memory: 0 points
+Qdrant biographical_memory: 0 points

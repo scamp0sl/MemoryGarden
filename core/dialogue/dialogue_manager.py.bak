@@ -1,0 +1,1123 @@
+"""
+대화 흐름 관리자
+
+세션 시작/종료, 대화 턴 관리, 컨텍스트 윈도우 관리.
+Redis Session Memory를 활용하여 최근 N턴 유지.
+
+Author: Memory Garden Team
+Created: 2025-02-10
+"""
+
+# ============================================
+# 1. Standard Library Imports
+# ============================================
+from typing import Dict, Any, List, Optional, Union
+from datetime import datetime
+from uuid import uuid4
+import json
+import random
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, desc
+
+# ============================================
+# 2. Third-Party Imports
+# ============================================
+
+# ============================================
+# 3. Local Imports
+# ============================================
+from database.redis_client import redis_client
+from database.models import Conversation
+from core.dialogue.response_generator import ResponseGenerator
+from core.dialogue.prompt_builder import PromptBuilder
+from core.memory.memory_manager import MemoryManager
+from utils.logger import get_logger
+from utils.exceptions import WorkflowError
+
+# ============================================
+# 4. Logger 설정
+# ============================================
+logger = get_logger(__name__)
+
+# ============================================
+# 5. 상수 정의
+# ============================================
+MAX_CONTEXT_TURNS = 30   # 최근 30턴 유지 (사용자 요청 반영: 약 2일치)
+SESSION_TTL = 86400      # 24시간 (초 단위)
+CONTEXT_TTL = 3600       # 1시간 (초 단위)
+
+# 대화 품질 개선 상수
+QUESTION_HISTORY_TTL = 2592000  # 질문 이력 보관 30일 (초)
+STORY_MODE_INTERVAL = 4         # N턴마다 미니 스토리 모드 시도
+STORY_DEPTH_TURNS = 2           # 미니 스토리 모드 지속 턴 수
+ROLE_REVERSAL_INTERVAL = 7      # N턴마다 역할 전환
+TO_ASSESSMENT_INTERVAL = 5      # N턴마다 시간 지남력(TO) 질문 1회 포함
+
+# 대화 종료 기준 (1시간 윈도우 기반)
+TURN_WINDOW_SECONDS = 3600      # 1시간 윈도우 (초)
+MAX_TURNS_PER_WINDOW = 3        # 윈도우 내 연속 턴 수 (3턴 이상 시 피로도 방지 발동)
+
+# ============================================
+# 6. DialogueManager 클래스
+# ============================================
+
+
+class DialogueManager:
+    """대화 흐름 관리자
+
+    세션 생명주기 관리, 대화 턴 추가/조회, 컨텍스트 윈도우 관리.
+
+    Attributes:
+        response_generator: AI 응답 생성기
+        prompt_builder: 프롬프트 빌더
+        max_context_turns: 컨텍스트 윈도우 크기 (최근 N턴)
+
+    Example:
+        >>> manager = DialogueManager()
+        >>> session_id = await manager.start_session(user_id="user123")
+        >>> await manager.add_turn(
+        ...     user_id="user123",
+        ...     user_message="오늘 점심 뭐 먹었어요",
+        ...     assistant_message="된장찌개요"
+        ... )
+        >>> history = await manager.get_conversation_history("user123")
+    """
+
+    def __init__(
+        self,
+        response_generator: Optional[ResponseGenerator] = None,
+        prompt_builder: Optional[PromptBuilder] = None,
+        max_context_turns: int = MAX_CONTEXT_TURNS
+    ):
+        """
+        DialogueManager 초기화
+
+        Args:
+            response_generator: 응답 생성기 (None이면 생성)
+            prompt_builder: 프롬프트 빌더 (None이면 생성)
+            max_context_turns: 컨텍스트 윈도우 크기
+        """
+        self.response_generator = response_generator or ResponseGenerator()
+        self.prompt_builder = prompt_builder or PromptBuilder()
+        self.memory_manager = MemoryManager()
+        self.max_context_turns = max_context_turns
+
+        logger.info(
+            "DialogueManager initialized",
+            extra={"max_context_turns": max_context_turns}
+        )
+
+    async def start_session(
+        self,
+        user_id: str,
+        initial_context: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        대화 세션 시작
+
+        Args:
+            user_id: 사용자 ID
+            initial_context: 초기 컨텍스트 (선택)
+                {
+                    "user_name": "홍길동",
+                    "garden_name": "행복한 정원",
+                    ...
+                }
+
+        Returns:
+            session_id: 세션 고유 ID
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> session_id = await manager.start_session(
+            ...     user_id="user123",
+            ...     initial_context={"user_name": "홍길동"}
+            ... )
+        """
+        session_id = str(uuid4())
+
+        session_data = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "started_at": datetime.now().isoformat(),
+            "last_updated_at": datetime.now().isoformat(),
+            "turn_count": 0,
+            "context": initial_context or {},
+            "conversation_history": []
+        }
+
+        # Redis에 저장 (24시간 TTL)
+        await redis_client.set_session(
+            user_id=user_id,
+            session_data=session_data,
+            ttl=SESSION_TTL
+        )
+
+        logger.info(
+            "Session started",
+            extra={
+                "user_id": user_id,
+                "session_id": session_id
+            }
+        )
+
+        return session_id
+
+    async def end_session(self, user_id: str) -> None:
+        """
+        대화 세션 종료
+
+        Args:
+            user_id: 사용자 ID
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> await manager.end_session("user123")
+        """
+        await redis_client.delete_session(user_id)
+
+        logger.info("Session ended", extra={"user_id": user_id})
+
+    async def get_session(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """
+        세션 데이터 조회
+
+        Args:
+            user_id: 사용자 ID
+
+        Returns:
+            세션 데이터 또는 None (세션 없음)
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> session = await manager.get_session("user123")
+            >>> print(session["turn_count"])
+        """
+        session_data = await redis_client.get_session(user_id)
+
+        if session_data:
+            logger.debug(
+                "Session retrieved",
+                extra={
+                    "user_id": user_id,
+                    "turn_count": session_data.get("turn_count", 0)
+                }
+            )
+
+        return session_data
+
+    async def add_turn(
+        self,
+        user_id: str,
+        user_message: str,
+        assistant_message: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        대화 턴 추가
+
+        Args:
+            user_id: 사용자 ID
+            user_message: 사용자 메시지
+            assistant_message: AI 응답
+            metadata: 추가 메타데이터 (감정, 분석 결과 등)
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> await manager.add_turn(
+            ...     user_id="user123",
+            ...     user_message="오늘 점심 뭐 먹었어요",
+            ...     assistant_message="된장찌개요",
+            ...     metadata={"emotion": "neutral", "mcdi_score": 78.5}
+            ... )
+        """
+        # 세션 가져오기
+        session_data = await self.get_session(user_id)
+
+        if not session_data:
+            logger.warning(f"No active session for user {user_id}, creating new session")
+            await self.start_session(user_id)
+            session_data = await self.get_session(user_id)
+
+        # 대화 턴 추가
+        turn = {
+            "timestamp": datetime.now().isoformat(),
+            "user": user_message,
+            "assistant": assistant_message,
+            "metadata": metadata or {}
+        }
+
+        session_data.setdefault("conversation_history", []).append(turn)
+        session_data["turn_count"] = session_data.get("turn_count", 0) + 1
+        session_data["last_updated_at"] = datetime.now().isoformat()
+
+        # 컨텍스트 윈도우 크기 제한 (최근 N턴만 유지)
+        if len(session_data["conversation_history"]) > self.max_context_turns:
+            # 오래된 턴 제거
+            removed_count = len(session_data["conversation_history"]) - self.max_context_turns
+            session_data["conversation_history"] = session_data["conversation_history"][removed_count:]
+
+            logger.debug(
+                f"Conversation history trimmed: removed {removed_count} old turns",
+                extra={"user_id": user_id, "removed_count": removed_count}
+            )
+
+        # Redis에 업데이트
+        await redis_client.set_session(
+            user_id=user_id,
+            session_data=session_data,
+            ttl=SESSION_TTL
+        )
+
+        logger.info(
+            "Turn added",
+            extra={
+                "user_id": user_id,
+                "turn_count": session_data["turn_count"],
+                "history_length": len(session_data["conversation_history"])
+            }
+        )
+
+    async def get_conversation_history(
+        self,
+        user_id: str,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, str]]:
+        """
+        대화 히스토리 조회 (ChatCompletion 형식)
+
+        Args:
+            user_id: 사용자 ID
+            limit: 최근 N턴만 가져오기 (None이면 전체)
+
+        Returns:
+            대화 히스토리
+            [
+                {"role": "user", "content": "..."},
+                {"role": "assistant", "content": "..."},
+                ...
+            ]
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> history = await manager.get_conversation_history("user123", limit=5)
+            >>> print(len(history))  # 최근 5턴 = 10개 메시지 (user + assistant)
+        """
+        session_data = await self.get_session(user_id)
+
+        if not session_data:
+            return []
+
+        conversation_history = session_data.get("conversation_history", [])
+
+        # limit 적용
+        if limit:
+            conversation_history = conversation_history[-limit:]
+
+        # ChatCompletion 형식으로 변환
+        formatted_history = []
+        for turn in conversation_history:
+            formatted_history.append({
+                "role": "user",
+                "content": turn["user"]
+            })
+            formatted_history.append({
+                "role": "assistant",
+                "content": turn["assistant"]
+            })
+
+        logger.debug(
+            "Conversation history retrieved",
+            extra={
+                "user_id": user_id,
+                "total_messages": len(formatted_history),
+                "turns": len(conversation_history)
+            }
+        )
+
+        return formatted_history
+
+    async def restore_session(
+        self,
+        user_id: str,
+        db_session: AsyncSession
+    ) -> Optional[Dict[str, Any]]:
+        """
+        DB에서 과거 대화 내역을 조회하여 Redis 세션 복구
+
+        Args:
+            user_id: 사용자 UUID (문자열 또는 UUID 객체)
+            db_session: SQLAlchemy 비동기 세션
+
+        Returns:
+            복구된 세션 데이터 또는 None
+        """
+        from uuid import UUID
+        try:
+            user_uuid = UUID(user_id) if isinstance(user_id, str) else user_id
+        except ValueError:
+            logger.error(f"Invalid user_id format for restoration: {user_id}")
+            return None
+
+        logger.info(f"Attempting to restore session from DB for user: {user_uuid}")
+
+        # 1. DB에서 최근 대화 조회 (최근순)
+        result = await db_session.execute(
+            select(Conversation)
+            .where(Conversation.user_id == user_uuid)
+            .order_by(desc(Conversation.created_at))
+            .limit(self.max_context_turns)
+        )
+        conversations = result.scalars().all()
+
+        if not conversations:
+            logger.info(f"No past conversations found in DB for user: {user_uuid}")
+            return None
+
+        # 2. Redis 세션 형식으로 변환 (오래된 순으로 정렬)
+        history = []
+        for conv in reversed(conversations):
+            history.append({
+                "timestamp": conv.created_at.isoformat() if conv.created_at else datetime.now().isoformat(),
+                "user": conv.message,
+                "assistant": conv.response or "",
+                "metadata": {
+                    "category": conv.category,
+                    "message_type": conv.message_type
+                }
+            })
+
+        # 3. 세션 데이터 구성
+        session_id = str(uuid4())
+        session_data = {
+            "session_id": session_id,
+            "user_id": str(user_uuid),
+            "started_at": history[0]["timestamp"] if history else datetime.now().isoformat(),
+            "last_updated_at": datetime.now().isoformat(),
+            "turn_count": len(history),
+            "context": {},
+            "conversation_history": history
+        }
+
+        # 4. Redis에 저장
+        await redis_client.set_session(
+            user_id=str(user_uuid),
+            session_data=session_data,
+            ttl=SESSION_TTL
+        )
+
+        logger.info(
+            "Session restored from DB",
+            extra={
+                "user_id": str(user_uuid),
+                "turns_restored": len(history)
+            }
+        )
+
+        return session_data
+
+    async def update_context(
+        self,
+        user_id: str,
+        context_updates: Dict[str, Any]
+    ) -> None:
+        """
+        세션 컨텍스트 업데이트
+
+        Args:
+            user_id: 사용자 ID
+            context_updates: 업데이트할 컨텍스트
+                {
+                    "recent_emotion": "기쁨",
+                    "biographical_facts": {...}
+                }
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> await manager.update_context(
+            ...     user_id="user123",
+            ...     context_updates={"recent_emotion": "기쁨"}
+            ... )
+        """
+        session_data = await self.get_session(user_id)
+
+        if not session_data:
+            logger.warning(f"No active session for user {user_id}, cannot update context")
+            return
+
+        # context 키가 없으면 초기화
+        if "context" not in session_data:
+            session_data["context"] = {}
+
+        # 컨텍스트 업데이트 (기존 값 유지하며 병합)
+        session_data["context"].update(context_updates)
+        session_data["last_updated_at"] = datetime.now().isoformat()
+        session_data["last_updated_at"] = datetime.now().isoformat()
+
+        # Redis에 저장
+        await redis_client.set_session(
+            user_id=user_id,
+            session_data=session_data,
+            ttl=SESSION_TTL
+        )
+
+        logger.debug(
+            "Context updated",
+            extra={
+                "user_id": user_id,
+                "updated_keys": list(context_updates.keys())
+            }
+        )
+
+    async def generate_response(
+        self,
+        user_id: str,
+        user_message: str,
+        next_question: Optional[str] = None,
+        emotion: Optional[str] = None,
+        emotion_intensity: Optional[float] = None
+    ) -> str:
+        """
+        AI 응답 생성 (컨텍스트 자동 주입)
+
+        Args:
+            user_id: 사용자 ID
+            user_message: 사용자 메시지
+            next_question: 다음 질문 (선택)
+            emotion: 감지된 감정 (선택)
+            emotion_intensity: 감정 강도 (선택)
+
+        Returns:
+            생성된 응답 메시지
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> response = await manager.generate_response(
+            ...     user_id="user123",
+            ...     user_message="오늘 점심은 된장찌개요",
+            ...     next_question="어떤 반찬과 함께 드셨어요?"
+            ... )
+        """
+        # 세션 및 히스토리 가져오기
+        session_data = await self.get_session(user_id)
+
+        if not session_data:
+            logger.warning(f"No active session for user {user_id}, creating new session")
+            await self.start_session(user_id)
+            session_data = await self.get_session(user_id)
+
+        # [버그수정] 세션 user_id 불일치 검증 - 컨텍스트 누수 감지 및 차단
+        if not self._validate_session_user(session_data, user_id):
+            logger.error(
+                f"[CONTEXT_LEAK] Session user_id mismatch in generate_response! "
+                f"Resetting session for user {user_id}"
+            )
+            await self.start_session(user_id)
+            session_data = await self.get_session(user_id)
+
+        conversation_history = await self.get_conversation_history(user_id)
+        user_context = session_data.get("context", {}).copy()
+        turn_count = session_data.get("turn_count", 0)
+
+        # 영구 기억(Biographical Facts) 가져오기 및 병합
+        try:
+            biographical_facts = await self.memory_manager._retrieve_biographical_facts(user_id)
+            if biographical_facts:
+                # 간단한 키-값 매핑으로 변환하여 컨텍스트에 주입
+                fact_map = {k: v.get("value") for k, v in biographical_facts.items()}
+                if "biographical_facts" not in user_context:
+                    user_context["biographical_facts"] = {}
+                user_context["biographical_facts"].update(fact_map)
+                logger.debug(f"Merged {len(fact_map)} biographical facts into context for {user_id}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch biographical facts for context: {e}")
+
+        # Task 1: 최근 대화에서 사용자 발언 추출 → 시스템 프롬프트에 주입
+        # [버그수정] 스케줄러 모드(scheduler_mode=True)일 때는 recent_mentions를 주입하지 않음
+        # → 어제 대화 내용(선식당 등)이 스케줄러 자동 메시지에 과도하게 반영되는 현상 방지
+        is_scheduler_mode = user_context.get("scheduler_mode", False)
+        if not is_scheduler_mode:
+            recent_mentions = self._extract_recent_mentions(conversation_history)
+            if recent_mentions:
+                user_context["recent_mentions"] = recent_mentions
+        else:
+            logger.debug(f"[scheduler_mode] recent_mentions 주입 억제: {user_id}")
+            user_context.pop("recent_mentions", None)
+
+        # Task 4: 역할 전환 (N턴마다 사용자에게 질문 기회 부여)
+        role_reversal_mode = (
+            turn_count > 0 and turn_count % ROLE_REVERSAL_INTERVAL == 0
+        )
+        if role_reversal_mode:
+            user_context["role_reversal_mode"] = True
+            next_question = None  # 역할 전환 턴에는 템플릿 질문 대신 LLM이 자연스럽게 유도
+            logger.info(f"Role reversal mode activated for {user_id} at turn {turn_count}")
+
+        # Task 3: 미니 스토리 모드 (N턴마다 현재 주제를 2턴 더 깊이 탐색)
+        session_context = session_data.get("context", {})
+        story_topic = None
+        if not role_reversal_mode:
+            story_remaining = session_context.get("story_remaining_turns", 0)
+
+            if story_remaining > 0:
+                # 스토리 모드 진행 중: 남은 턴 차감
+                story_topic = session_context.get("story_topic")
+                new_remaining = story_remaining - 1
+                await self.update_context(user_id, {
+                    "story_remaining_turns": new_remaining,
+                    "story_topic": story_topic if new_remaining > 0 else None
+                })
+                logger.info(
+                    f"Story mode active for {user_id}: topic='{story_topic[:30] if story_topic else ''}', remaining={story_remaining}"
+                )
+            elif turn_count > 0 and turn_count % STORY_MODE_INTERVAL == 0:
+                # 스토리 모드 새로 시작
+                story_topic = user_message
+                await self.update_context(user_id, {
+                    "story_topic": story_topic,
+                    "story_remaining_turns": STORY_DEPTH_TURNS
+                })
+                logger.info(f"Story mode started for {user_id} at turn {turn_count}")
+
+        if story_topic:
+            user_context["story_topic"] = story_topic
+
+        # 보완 1+3: TO 평가 주기 보호 (5턴마다 시간 지남력 질문 1회 포함)
+        last_to_turn = session_context.get("last_to_assessment_turn", -(TO_ASSESSMENT_INTERVAL))
+        to_overdue = (turn_count - last_to_turn) >= TO_ASSESSMENT_INTERVAL
+
+        if to_overdue:
+            if role_reversal_mode:
+                # 보완 3: 역할 전환 중에도 TO 질문을 프롬프트를 통해 자연스럽게 주입
+                user_context["to_assessment_needed"] = True
+                await self.update_context(user_id, {"last_to_assessment_turn": turn_count})
+                logger.info(
+                    f"TO assessment flagged during role reversal for {user_id} at turn {turn_count}"
+                )
+            else:
+                # 보완 1: 일반/스토리 모드 - 시스템 프롬프트에 TO 포함 요청
+                user_context["to_assessment_needed"] = True
+                await self.update_context(user_id, {"last_to_assessment_turn": turn_count})
+                logger.info(
+                    f"TO assessment needed flag set for {user_id} at turn {turn_count}"
+                )
+
+        # 보완 2: 현재 대화 모드 세션에 저장 (SD 편향 분석용)
+        conversation_mode = "story" if story_topic else ("role_reversal" if role_reversal_mode else "normal")
+        await self.update_context(user_id, {"last_conversation_mode": conversation_mode})
+
+        # 저녁 시간대 1일 1회 회상 필수 플래그
+        now = datetime.now()
+        if 18 <= now.hour <= 23:
+            date_str = now.strftime("%Y-%m-%d")
+            reflection_key = f"evening_reflection_done:{user_id}:{date_str}"
+            try:
+                redis_conn = await redis_client.get_client()
+                if redis_conn:
+                    already_done = await redis_conn.get(reflection_key)
+                    if not already_done:
+                        user_context["evening_reflection_needed"] = True
+                        await redis_conn.setex(reflection_key, 86400, "1")
+                        logger.info(f"Evening reflection flag set for {user_id}")
+            except Exception as e:
+                logger.warning(f"Failed to check evening reflection flag for {user_id}: {e}")
+
+        # Task 5: 대화 피로도 방지 (최근 1시간 내 MAX_TURNS_PER_WINDOW 이상 진행 시 질문 중단)
+        # 단, evening_reflection_needed, to_assessment_needed, role_reversal_mode 등 필수 로직이 있다면 질문 중단을 보류합니다.
+        recent_turn_count = self._count_recent_turns(session_data, TURN_WINDOW_SECONDS)
+        if recent_turn_count >= MAX_TURNS_PER_WINDOW:
+            missing_essential = user_context.get("evening_reflection_needed") or user_context.get("to_assessment_needed") or user_context.get("role_reversal_mode")
+            if missing_essential:
+                logger.info(
+                    f"Conversation reached {recent_turn_count} turns, but essential assessment overrides question suppression for {user_id}."
+                )
+            else:
+                user_context["suppress_questions"] = True
+                user_context.pop("story_topic", None)
+                next_question = None
+                logger.info(
+                    f"Conversation reached {recent_turn_count} turns in last 1 hour window, "
+                    f"suppressing further questions for {user_id}"
+                )
+
+        # [추가] 호칭 관련 특수 지침 (기억 삭제 후 또는 미설정 시)
+        cleanup_flag_key = f"nickname_cleaned:{user_id}"
+        try:
+            redis_conn = await redis_client.get_client()
+            if redis_conn:
+                has_cleaned = await redis_conn.get(cleanup_flag_key)
+                if has_cleaned:
+                    user_context["apologize_for_nickname"] = True
+                    # 소모성 플래그이므로 삭제
+                    await redis_conn.delete(cleanup_flag_key)
+                    logger.info(f"Apology flag set for {user_id} (memory recently cleaned)")
+        except Exception as e:
+            logger.warning(f"Failed to check nickname cleanup flag for {user_id}: {e}")
+
+        # 호칭이 아예 없는 경우 (name 또는 nickname 모두 부재 시)
+        bio_facts = user_context.get("biographical_facts", {})
+        if not bio_facts.get("name") and not bio_facts.get("nickname"):
+            # 대화 피로도 방지 모드가 아닐 때만 호칭 물어보기
+            if not user_context.get("suppress_questions"):
+                user_context["prompt_for_nickname"] = True
+                logger.info(f"Nickname prompt flag set for {user_id} (no nickname/name found)")
+
+        # 감정 기반 응답 vs 일반 응답
+        if emotion and emotion_intensity is not None:
+            response = await self.response_generator.generate_empathetic_response(
+                user_message=user_message,
+                detected_emotion=emotion,
+                emotion_intensity=emotion_intensity,
+                conversation_history=conversation_history,
+                user_context=user_context
+            )
+        else:
+            response = await self.response_generator.generate(
+                user_message=user_message,
+                conversation_history=conversation_history,
+                user_context=user_context,
+                next_question=next_question
+            )
+
+        logger.info(
+            "Response generated via DialogueManager",
+            extra={
+                "user_id": user_id,
+                "with_emotion": emotion is not None,
+                "story_mode": story_topic is not None,
+                "role_reversal": role_reversal_mode,
+                "response_length": len(response)
+            }
+        )
+
+        return response
+
+    async def get_session_stats(self, user_id: str) -> Dict[str, Any]:
+        """
+        세션 통계 조회
+
+        Args:
+            user_id: 사용자 ID
+
+        Returns:
+            세션 통계
+            {
+                "session_id": "...",
+                "turn_count": 15,
+                "started_at": "2025-02-10T10:00:00",
+                "last_updated_at": "2025-02-10T15:30:00",
+                "context_keys": ["user_name", "garden_name", ...]
+            }
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> stats = await manager.get_session_stats("user123")
+            >>> print(stats["turn_count"])
+        """
+        session_data = await self.get_session(user_id)
+
+        if not session_data:
+            return {}
+
+        return {
+            "session_id": session_data.get("session_id"),
+            "turn_count": session_data.get("turn_count", 0),
+            "started_at": session_data.get("started_at"),
+            "last_updated_at": session_data.get("last_updated_at"),
+            "context_keys": list(session_data.get("context", {}).keys()),
+            "history_length": len(session_data.get("conversation_history", []))
+        }
+
+    # ============================================
+    # 워크플로우 통합 메서드 (CLAUDE.md 기반)
+    # ============================================
+
+    async def plan_next(
+        self,
+        user_id: str,
+        current_analysis: Dict[str, Any],
+        risk_level: str
+    ) -> Dict[str, Any]:
+        """
+        다음 상호작용 계획
+
+        weakest metric 우선 + risk_level 기반 난이도 조정
+
+        Args:
+            user_id: 사용자 ID
+            current_analysis: 현재 분석 결과
+                {
+                    "scores": {"LR": 75, "SD": 80, ...},
+                    "mcdi_score": 78.5
+                }
+            risk_level: 위험도 (GREEN/YELLOW/ORANGE/RED)
+
+        Returns:
+            다음 계획
+            {
+                "category": "episodic_recall",
+                "difficulty": "medium",
+                "question_type": "free_recall"
+            }
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> plan = await manager.plan_next(
+            ...     user_id="user123",
+            ...     current_analysis={"scores": {"LR": 75, ...}},
+            ...     risk_level="YELLOW"
+            ... )
+            >>> print(plan["category"])
+            "episodic_recall"
+        """
+        logger.debug(f"Planning next interaction for {user_id}")
+
+        # 1. Weakest Metric 찾기
+        scores = current_analysis.get("scores", {})
+        if not scores:
+            # 기본값
+            category = "general"
+            question_type = "open_ended"
+        else:
+            # 최저 점수 지표 선택
+            min_metric = min(scores.items(), key=lambda x: x[1] if x[1] is not None else 100)
+            metric_name, metric_score = min_metric
+
+            # 지표명 → 카테고리 매핑
+            category_mapping = {
+                "LR": "lexical_richness",
+                "SD": "semantic_focus",
+                "NC": "narrative",
+                "TO": "temporal_orientation",
+                "ER": "episodic_recall",
+                "RT": "response_speed"
+            }
+            category = category_mapping.get(metric_name, "general")
+
+            # 질문 유형 결정
+            question_type = self._determine_question_type(metric_name, metric_score)
+
+        # 2. 난이도 조정 (risk_level 기반)
+        difficulty = self._determine_difficulty(risk_level, scores.get(min_metric[0], 80) if scores else 80)
+
+        # 3. 세션에 계획 저장
+        await self.update_context(
+            user_id=user_id,
+            context_updates={
+                "next_category": category,
+                "next_difficulty": difficulty,
+                "next_question_type": question_type
+            }
+        )
+
+        plan = {
+            "category": category,
+            "difficulty": difficulty,
+            "question_type": question_type
+        }
+
+        logger.info(
+            "Next interaction planned",
+            extra={
+                "user_id": user_id,
+                "plan": plan
+            }
+        )
+
+        return plan
+
+    def _determine_question_type(self, metric_name: str, score: float) -> str:
+        """질문 유형 결정"""
+        if metric_name == "ER":
+            return "free_recall" if score < 70 else "cued_recall"
+        elif metric_name == "TO":
+            return "time_orientation"
+        elif metric_name == "NC":
+            return "narrative"
+        elif metric_name == "LR":
+            return "descriptive"
+        elif metric_name == "SD":
+            return "focused"
+        else:
+            return "open_ended"
+
+    def _determine_difficulty(self, risk_level: str, current_score: float) -> str:
+        """난이도 결정"""
+        # risk_level 기반
+        if risk_level == "RED":
+            return "easy"
+        elif risk_level == "ORANGE":
+            return "easy" if current_score < 50 else "medium"
+        elif risk_level == "YELLOW":
+            return "medium"
+        else:  # GREEN
+            return "medium" if current_score > 80 else "hard"
+
+    async def generate_confound_question(
+        self,
+        user_id: str
+    ) -> str:
+        """
+        교란 변수 확인 질문 생성
+
+        점수 하락 시 수면/우울/약물 등 확인
+
+        Args:
+            user_id: 사용자 ID
+
+        Returns:
+            교란 변수 질문
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> question = await manager.generate_confound_question("user123")
+            >>> print(question)
+            "요즘 잠은 잘 주무시나요? 🌙"
+        """
+        logger.debug(f"Generating confound question for {user_id}")
+
+        # 교란 변수 질문 풀 (순환)
+        confound_questions = [
+            "요즘 잠은 잘 주무시나요? 🌙",
+            "기분이 어떠신가요? 평소와 다른 점은 없으신가요? 😊",
+            "최근에 드시는 약이 바뀌셨거나 새로 추가된 건 없으신가요? 💊",
+            "요즘 몸 어디 불편한 곳은 없으신가요? 🏥",
+            "요즘 걱정되는 일이나 스트레스 받는 일이 있으신가요? 💭"
+        ]
+
+        # 세션에서 마지막 사용한 인덱스 가져오기
+        session_data = await self.get_session(user_id)
+        last_confound_index = session_data.get("context", {}).get("last_confound_index", -1) if session_data else -1
+
+        # 다음 질문 선택 (순환)
+        next_index = (last_confound_index + 1) % len(confound_questions)
+        question = confound_questions[next_index]
+
+        # 인덱스 저장
+        await self.update_context(
+            user_id=user_id,
+            context_updates={"last_confound_index": next_index}
+        )
+
+        logger.info(
+            "Confound question generated",
+            extra={
+                "user_id": user_id,
+                "question_index": next_index
+            }
+        )
+
+        return question
+
+    # ============================================
+    # 대화 품질 개선 헬퍼 메서드
+    # ============================================
+
+    async def _get_used_questions(self, user_id: str, category: str) -> List[str]:
+        """Redis에서 사용자별·카테고리별 사용한 질문 이력 조회 (30일 TTL)"""
+        key = f"question_history:{user_id}:{category}"
+        try:
+            data = await redis_client.get(key)
+            if data:
+                return json.loads(data)
+        except Exception as e:
+            logger.warning(f"Failed to get question history for {user_id}/{category}: {e}")
+        return []
+
+    async def _save_used_question(self, user_id: str, category: str, question: str) -> None:
+        """사용한 질문을 Redis에 저장 (30일 TTL, 중복 방지)"""
+        key = f"question_history:{user_id}:{category}"
+        try:
+            used = await self._get_used_questions(user_id, category)
+            if question not in used:
+                used.append(question)
+            await redis_client.set(key, json.dumps(used, ensure_ascii=False), ttl=QUESTION_HISTORY_TTL)
+        except Exception as e:
+            logger.warning(f"Failed to save question history for {user_id}/{category}: {e}")
+
+    def _extract_recent_mentions(self, conversation_history: List[Dict[str, str]]) -> List[str]:
+        """최근 대화 히스토리에서 사용자 발언만 추출 (최근 3개)"""
+        user_messages = [
+            msg["content"]
+            for msg in conversation_history
+            if msg.get("role") == "user"
+        ]
+        return user_messages[-3:] if user_messages else []
+
+    def _validate_session_user(self, session_data: Optional[Dict[str, Any]], user_id: str) -> bool:
+        """
+        세션이 요청한 user_id와 일치하는지 검증
+
+        [버그수정] 세션 user_id 불일치(컨텍스트 누수)를 감지하고 차단.
+        세션이 None이거나 user_id가 없으면 통과 (새 세션으로 처리).
+
+        Args:
+            session_data: Redis에서 가져온 세션 데이터
+            user_id: 요청한 사용자 ID
+
+        Returns:
+            bool: 일치하면 True, 불일치하면 False (누수 의심)
+        """
+        if not session_data:
+            return True  # 세션 없음은 정상 (새로 생성됨)
+
+        session_user_id = session_data.get("user_id", "")
+        if not session_user_id:
+            return True  # user_id 필드 없음은 이전 버전 세션 (통과)
+
+        if session_user_id != user_id:
+            logger.error(
+                f"[CONTEXT_LEAK] 세션 user_id 불일치! "
+                f"세션에 저장된 user_id={session_user_id}, "
+                f"요청 user_id={user_id}. "
+                f"타 사용자 컨텍스트가 주입될 수 있어 세션을 초기화합니다."
+            )
+            return False
+
+        return True
+
+    def _count_recent_turns(
+        self,
+        session_data: Dict[str, Any],
+        window_seconds: int = TURN_WINDOW_SECONDS
+    ) -> int:
+        """
+        최근 N초 내 발생한 대화 턴 수 계산 (슬라이딩 윈도우)
+
+        대화 피로도 방지를 위해 최근 1시간 내 턴 수를 계산합니다.
+        1시간 이상 쉬고 돌아오면 카운터가 리셋되어 다시 대화 가능.
+
+        Args:
+            session_data: 세션 데이터 (conversation_history 포함)
+            window_seconds: 시간 윈도우 (기본: 1시간 = 3600초)
+
+        Returns:
+            최근 윈도우 내 턴 수
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> session = await manager.get_session("user123")
+            >>> recent_turns = manager._count_recent_turns(session)
+            >>> print(recent_turns)  # 최근 1시간 내 턴 수
+        """
+        from datetime import timedelta
+
+        history = session_data.get("conversation_history", [])
+        if not history:
+            return 0
+
+        cutoff_time = datetime.now() - timedelta(seconds=window_seconds)
+
+        recent_count = 0
+        for turn in history:
+            turn_time_str = turn.get("timestamp", "")
+            if turn_time_str:
+                try:
+                    turn_time = datetime.fromisoformat(turn_time_str)
+                    if turn_time >= cutoff_time:
+                        recent_count += 1
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"Failed to parse turn timestamp: {turn_time_str}, error: {e}")
+                    continue
+
+        logger.debug(
+            f"Counted recent turns: {recent_count} in last {window_seconds} seconds"
+        )
+
+        return recent_count
+
+    async def generate_next_question(
+        self,
+        user_id: str,
+        category: str,
+        difficulty: str,
+        question_type: str
+    ) -> str:
+        """
+        다음 질문 생성
+
+        카테고리, 난이도, 질문 유형에 맞는 질문 생성
+
+        Args:
+            user_id: 사용자 ID
+            category: 질문 카테고리
+            difficulty: 난이도 (easy/medium/hard)
+            question_type: 질문 유형
+
+        Returns:
+            생성된 질문
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> question = await manager.generate_next_question(
+            ...     user_id="user123",
+            ...     category="episodic_recall",
+            ...     difficulty="medium",
+            ...     question_type="free_recall"
+            ... )
+        """
+        logger.debug(
+            f"Generating next question",
+            extra={
+                "category": category,
+                "difficulty": difficulty,
+                "question_type": question_type
+            }
+        )
+
+        # Redis에서 사용한 질문 이력 조회 (Task 2: 중복 방지)
+        used_questions = await self._get_used_questions(user_id, category)
+
+        # 프롬프트 빌더를 사용하여 질문 생성 (이미 사용한 질문 제외)
+        question = await self.prompt_builder.build_question(
+            category=category,
+            difficulty=difficulty,
+            question_type=question_type,
+            used_questions=used_questions
+        )
+
+        # 사용한 질문 Redis에 저장
+        await self._save_used_question(user_id, category, question)
+
+        logger.info(
+            "Next question generated",
+            extra={
+                "user_id": user_id,
+                "question_length": len(question),
+                "used_questions_count": len(used_questions)
+            }
+        )
+
+        return question
+
+    async def get_last_conversation_mode(self, user_id: str) -> str:
+        """
+        마지막 대화 모드 조회 (SD 편향 플래그용)
+
+        Args:
+            user_id: 사용자 ID
+
+        Returns:
+            대화 모드: "normal" | "story" | "role_reversal"
+
+        Example:
+            >>> manager = DialogueManager()
+            >>> mode = await manager.get_last_conversation_mode("user123")
+            >>> print(mode)
+            "story"
+        """
+        session_data = await self.get_session(user_id)
+        if not session_data:
+            return "normal"
+        return session_data.get("context", {}).get("last_conversation_mode", "normal")
+
+
+# ============================================
+# 8. Export
+# ============================================
+__all__ = [
+    "DialogueManager",
+]
+
+logger.info("Dialogue manager module loaded")

@@ -1,0 +1,172 @@
+{
+  "generated_at": "2026-03-19T09:51:19.681399",
+  "total_conversations": 306,
+  "total_analysis_results": 301,
+  "response_patterns": {
+    "total_responses": 306,
+    "avg_response_length": 128.28758169934642,
+    "min_response_length": 26,
+    "max_response_length": 578,
+    "repetitive_phrases": {
+      "그렇군요": 9,
+      "들려주세요": 1
+    },
+    "question_types": {
+      "개방형 질문": 173,
+      "폐쇄형 질문": 20,
+      "선택형 질문": 87,
+      "유도형 질문": 0
+    }
+  },
+  "user_messages": {
+    "total_messages": 306,
+    "avg_message_length": 14.218954248366012,
+    "categories": {
+      "NAMING": 120,
+      "CHOICE": 42,
+      "REMINISCENCE": 40,
+      "VISUAL": 39,
+      "TEMPORAL": 33,
+      "DAILY_EPISODIC": 28,
+      "onboarding": 4
+    },
+    "message_types": {
+      "text": 304,
+      "image": 2
+    },
+    "hourly_distribution": {
+      "3": 1,
+      "6": 3,
+      "7": 4,
+      "8": 1,
+      "9": 26,
+      "10": 33,
+      "11": 7,
+      "12": 13,
+      "13": 4,
+      "14": 28,
+      "15": 13,
+      "16": 14,
+      "17": 58,
+      "18": 37,
+      "19": 20,
+      "20": 15,
+      "21": 1,
+      "22": 8,
+      "23": 20
+    },
+    "daily_distribution": {
+      "2026-03-12": 63,
+      "2026-03-13": 124,
+      "2026-03-14": 40,
+      "2026-03-15": 15,
+      "2026-03-16": 20,
+      "2026-03-17": 7,
+      "2026-03-18": 33,
+      "2026-03-19": 4
+    },
+    "vocabulary_size": 809,
+    "total_words": 1146,
+    "type_token_ratio": 0.706
+  },
+  "theory_compliance": {
+    "repetitive_phrase_ratio": 0.029,
+    "repetitive_phrase_counts": {
+      "그렇군요": 9
+    },
+    "question_pattern_diversity": 121,
+    "top_question_patterns": [
+      [
+        "___ ___ ___ ___ ___ ___?",
+        26
+      ],
+      [
+        "___ ___ ___ ___?",
+        26
+      ],
+      [
+        "___ ___ ___ ___ ___?",
+        22
+      ],
+      [
+        "___ ___ ___ ___ ___ ___ ___?",
+        19
+      ],
+      [
+        "___ ___ ___ ___ ___ ___ ___ ___?",
+        17
+      ]
+    ],
+    "issues": []
+  },
+  "engagement": {
+    "unique_users": 14,
+    "avg_conversations_per_user": 21.857142857142858,
+    "most_active_users": {
+      "aa96e75d-70e2-4546-9001-043cc5db047d": 99,
+      "1d86a183-a253-4cd8-abc3-615b82eb75d8": 63,
+      "6d7c59af-b8da-485f-8510-430e4f39dfaa": 45,
+      "543126cc-6118-49d1-bde5-96c61fc5b04b": 28,
+      "1f729443-7b80-4d82-a227-c4751b3bf35f": 18
+    },
+    "daily_avg_message_length": {
+      "2026-03-19": 7.75,
+      "2026-03-18": 10.969696969696969,
+      "2026-03-17": 22.0,
+      "2026-03-16": 16.2,
+      "2026-03-15": 20.666666666666668,
+      "2026-03-14": 16.225,
+      "2026-03-13": 13.370967741935484,
+      "2026-03-12": 13.698412698412698
+    },
+    "avg_response_latency_ms": 2262.308970099668
+  },
+  "scores": {
+    "total_analyzed": 301,
+    "mcdi_avg": 80.28,
+    "mcdi_min": 63.95,
+    "mcdi_max": 89.8,
+    "risk_distribution": {
+      "GREEN": 177,
+      "YELLOW": 124
+    },
+    "metric_statistics": {
+      "LR": {
+        "avg": 84.25,
+        "min": 37.5,
+        "max": 100.0,
+        "count": 301
+      },
+      "SD": {
+        "avg": 87.96,
+        "min": 72.53,
+        "max": 100.0,
+        "count": 301
+      },
+      "NC": {
+        "avg": 46.51,
+        "min": 30.15,
+        "max": 68.77,
+        "count": 301
+      },
+      "TO": {
+        "avg": 88.11,
+        "min": 53.0,
+        "max": 100.0,
+        "count": 301
+      },
+      "ER": {
+        "avg": 84.78,
+        "min": 62.0,
+        "max": 92.0,
+        "count": 301
+      },
+      "RT": {
+        "avg": 86.88,
+        "min": 57.48,
+        "max": 100.0,
+        "count": 301
+      }
+    }
+  }
+}

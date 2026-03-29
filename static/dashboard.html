@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>기억의 정원 — 베타 테스트 대시보드</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg-base: #0f1219;
+      --bg-card: #1a2035;
+      --bg-hover: #1f2844;
+      --border: rgba(100, 120, 200, 0.12);
+      --text-main: #e2e8f4;
+      --text-sub: #7a89b0;
+      --green: #00d68f;
+      --yellow: #ffd166;
+      --orange: #ff9f43;
+      --red: #ff6b6b;
+      --blue: #4d7cf4;
+      --glow-g: rgba(0, 214, 143, 0.18);
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: var(--bg-base);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 200px;
+      flex-shrink: 0;
+      background: #141928;
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 20px 0;
+    }
+
+    .sidebar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .logo-icon {
+      width: 34px;
+      height: 34px;
+      background: linear-gradient(135deg, #00d68f, #0aab70);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 17px;
+      box-shadow: 0 4px 14px var(--glow-g);
+    }
+
+    .logo-text {
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+
+    .logo-text span {
+      display: block;
+      font-size: 9px;
+      color: var(--text-sub);
+      font-weight: 400;
+    }
+
+    .nav-section {
+      padding: 16px 10px 0;
+      flex: 1;
+    }
+
+    .nav-label {
+      font-size: 9px;
+      color: var(--text-sub);
+      font-weight: 600;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      padding: 0 8px 8px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text-sub);
+      transition: all .15s;
+      margin-bottom: 2px;
+    }
+
+    .nav-item:hover,
+    .nav-item.active {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+
+    .nav-item.active {
+      color: var(--green);
+    }
+
+    .sidebar-footer {
+      padding: 14px 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    .refresh-btn {
+      width: 100%;
+      padding: 7px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-sub);
+      font-size: 11px;
+      cursor: pointer;
+      transition: all .15s;
+      font-family: inherit;
+    }
+
+    .refresh-btn:hover {
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    .last-updated {
+      font-size: 9px;
+      color: var(--text-sub);
+      margin-top: 7px;
+      text-align: center;
+    }
+
+    /* ── Main ── */
+    .main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .page-title {
+      font-size: 19px;
+      font-weight: 700;
+    }
+
+    .page-title span {
+      color: var(--green);
+    }
+
+    .date-badge {
+      font-size: 11px;
+      color: var(--text-sub);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      padding: 5px 12px;
+      border-radius: 20px;
+    }
+
+    /* ── Stat Cards ── */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+    }
+
+    .stat-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 18px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+    }
+
+    .stat-card.blue::before {
+      background: linear-gradient(90deg, var(--blue), transparent);
+    }
+
+    .stat-card.green::before {
+      background: linear-gradient(90deg, var(--green), transparent);
+    }
+
+    .stat-card.orange::before {
+      background: linear-gradient(90deg, var(--orange), transparent);
+    }
+
+    .stat-card.red::before {
+      background: linear-gradient(90deg, var(--red), transparent);
+    }
+
+    .stat-icon {
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+
+    .stat-label {
+      font-size: 10px;
+      color: var(--text-sub);
+      font-weight: 500;
+      margin-bottom: 3px;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    .stat-card.blue .stat-value {
+      color: var(--blue);
+    }
+
+    .stat-card.green .stat-value {
+      color: var(--green);
+    }
+
+    .stat-card.orange .stat-value {
+      color: var(--orange);
+    }
+
+    .stat-card.red .stat-value {
+      color: var(--red);
+    }
+
+    .stat-sub {
+      font-size: 10px;
+      color: var(--text-sub);
+      margin-top: 3px;
+    }
+
+    /* ── Card ── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+    }
+
+    .card-header {
+      padding: 14px 18px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .card-body {
+      padding: 0;
+    }
+
+    .card-body-pad {
+      padding: 14px 18px;
+    }
+
+    /* ── User Table (full width) ── */
+    .user-table-card {}
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    thead th {
+      padding: 8px 10px;
+      text-align: left;
+      color: var(--text-sub);
+      font-weight: 500;
+      font-size: 10px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, .02);
+      white-space: nowrap;
+    }
+
+    thead th.sortable {
+      cursor: pointer;
+      user-select: none;
+    }
+
+    thead th.sortable:hover {
+      color: var(--text-main);
+    }
+
+    thead th.sort-asc::after {
+      content: ' ▲';
+      color: var(--green);
+      font-size: 8px;
+    }
+
+    thead th.sort-desc::after {
+      content: ' ▼';
+      color: var(--green);
+      font-size: 8px;
+    }
+
+    tbody tr {
+      cursor: pointer;
+      transition: background .1s;
+    }
+
+    tbody tr:hover {
+      background: var(--bg-hover);
+    }
+
+    tbody tr.selected {
+      background: rgba(77, 124, 244, .1);
+    }
+
+    tbody td {
+      padding: 9px 10px;
+      border-bottom: 1px solid rgba(100, 120, 200, 0.06);
+      vertical-align: middle;
+    }
+
+    .user-name {
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .user-key {
+      font-size: 9px;
+      color: var(--text-sub);
+      font-family: monospace;
+    }
+
+    .risk-badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 20px;
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: .05em;
+    }
+
+    .risk-GREEN {
+      background: rgba(0, 214, 143, .15);
+      color: var(--green);
+    }
+
+    .risk-YELLOW {
+      background: rgba(255, 209, 102, .15);
+      color: var(--yellow);
+    }
+
+    .risk-ORANGE {
+      background: rgba(255, 159, 67, .15);
+      color: var(--orange);
+    }
+
+    .risk-RED {
+      background: rgba(255, 107, 107, .15);
+      color: var(--red);
+    }
+
+    .risk-UNKNOWN {
+      background: rgba(120, 120, 120, .15);
+      color: var(--text-sub);
+    }
+
+    .inactive-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--red);
+      display: inline-block;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+
+    .active-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--green);
+      display: inline-block;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+
+    /* 마지막 대화 셀 */
+    .last-msg {
+      font-size: 11px;
+      color: var(--text-sub);
+      max-width: 200px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .last-msg em {
+      color: var(--text-main);
+      font-style: normal;
+    }
+
+    .category-tag {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 9px;
+      background: rgba(77, 124, 244, .12);
+      color: var(--blue);
+      margin-bottom: 2px;
+    }
+
+    .sparkline-container {
+      width: 64px;
+      height: 22px;
+    }
+
+    /* ── Bottom row ── */
+    .bottom-row {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 14px;
+      align-items: start;
+    }
+
+    /* ── Trend Chart (우측) ── */
+    .trend-chart-wrap {
+      position: relative;
+      height: 220px;
+    }
+
+    .user-select-label {
+      font-size: 9px;
+      color: var(--text-sub);
+      margin-bottom: 2px;
+    }
+
+    .user-select-name {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    .no-data {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 220px;
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+
+    /* ── Heatmap ── */
+    .heatmap-wrapper {
+      overflow-x: auto;
+    }
+
+    .heatmap-scroll {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 600px;
+    }
+
+    .heatmap-header {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .heatmap-label-col {
+      width: 80px;
+      flex-shrink: 0;
+    }
+
+    .heatmap-dates {
+      display: flex;
+      gap: 2px;
+    }
+
+    .heatmap-date-label {
+      font-size: 8px;
+      color: var(--text-sub);
+      width: 13px;
+      text-align: center;
+    }
+
+    .heatmap-row {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .heatmap-name {
+      width: 80px;
+      font-size: 10px;
+      color: var(--text-sub);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .heatmap-cells {
+      display: flex;
+      gap: 2px;
+    }
+
+    .heatmap-cell {
+      width: 13px;
+      height: 13px;
+      border-radius: 2px;
+      background: #1e2638;
+      transition: opacity .1s;
+      cursor: default;
+    }
+
+    .heatmap-cell:hover {
+      opacity: .7;
+    }
+
+    .heatmap-cell[data-cnt="1"] {
+      background: rgba(0, 214, 143, .3);
+    }
+
+    .heatmap-cell[data-cnt="2"] {
+      background: rgba(0, 214, 143, .55);
+    }
+
+    .heatmap-cell[data-cnt="3"],
+    .heatmap-cell[data-cnt="4"],
+    .heatmap-cell[data-cnt="5"] {
+      background: var(--green);
+    }
+
+    .heatmap-legend {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 6px;
+      font-size: 9px;
+      color: var(--text-sub);
+    }
+
+    .legend-cell {
+      width: 11px;
+      height: 11px;
+      border-radius: 2px;
+    }
+
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      gap: 7px;
+      color: var(--text-sub);
+      font-size: 12px;
+    }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--border);
+      border-top-color: var(--green);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .error-msg {
+      text-align: center;
+      padding: 16px;
+      color: var(--red);
+      font-size: 11px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-icon">🌿</div>
+      <div class="logo-text">기억의 정원<span>Beta Dashboard</span></div>
+    </div>
+    <nav class="nav-section">
+      <div class="nav-label">모니터링</div>
+      <div class="nav-item active">📊 일별 현황</div>
+      <div class="nav-item" onclick="alert('준비 중')">👥 사용자 관리</div>
+      <div class="nav-item" onclick="alert('준비 중')">📈 분석 리포트</div>
+      <div class="nav-item" onclick="alert('준비 중')">⚙️ 설정</div>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="refresh-btn" onclick="loadAll()">🔄 새로고침</button>
+      <div class="last-updated" id="lastUpdated">—</div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- Header -->
+    <div class="page-header">
+      <div class="page-title">베타 테스트 <span>현황판</span></div>
+      <div class="date-badge" id="todayDate">—</div>
+    </div>
+
+    <!-- Stat Cards -->
+    <div class="stat-grid">
+      <div class="stat-card blue">
+        <div class="stat-icon">👥</div>
+        <div class="stat-label">전체 사용자</div>
+        <div class="stat-value" id="totalUsers">—</div>
+        <div class="stat-sub">등록된 베타 테스터</div>
+      </div>
+      <div class="stat-card green">
+        <div class="stat-icon">💬</div>
+        <div class="stat-label">오늘 대화 완료</div>
+        <div class="stat-value" id="todayActive">—</div>
+        <div class="stat-sub">금일 1회 이상 응답</div>
+      </div>
+      <div class="stat-card orange">
+        <div class="stat-icon">⚠️</div>
+        <div class="stat-label">위험 감지 ORANGE+</div>
+        <div class="stat-value" id="dangerUsers">—</div>
+        <div class="stat-sub">최근 3일 내 감지</div>
+      </div>
+      <div class="stat-card red">
+        <div class="stat-icon">🔇</div>
+        <div class="stat-label">미응답 24h+</div>
+        <div class="stat-value" id="inactiveUsers">—</div>
+        <div class="stat-sub">이탈 위험 사용자</div>
+      </div>
+    </div>
+
+    <!-- 사용자별 일별 현황 (전체 너비) -->
+    <div class="card user-table-card">
+      <div class="card-header">
+        <div class="card-title">사용자별 일별 현황</div>
+        <div style="font-size:10px;color:var(--text-sub);">행 클릭 → MCDI 트렌드 조회 ›</div>
+      </div>
+      <div class="card-body" id="usersTableWrap">
+        <div class="loading">
+          <div class="spinner"></div>불러오는 중…
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Row: 히트맵 (좌) | MCDI 트렌드 (우) -->
+    <div class="bottom-row">
+
+      <!-- 히트맵 -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">일별 대화 참여 현황 (최근 30일)</div>
+          <div class="heatmap-legend">
+            <span>적음</span>
+            <div class="legend-cell" style="background:#1e2638"></div>
+            <div class="legend-cell" style="background:rgba(0,214,143,.3)"></div>
+            <div class="legend-cell" style="background:rgba(0,214,143,.55)"></div>
+            <div class="legend-cell" style="background:var(--green)"></div>
+            <span>많음</span>
+          </div>
+        </div>
+        <div class="card-body-pad" id="heatmapWrap">
+          <div class="loading">
+            <div class="spinner"></div>불러오는 중…
+          </div>
+        </div>
+      </div>
+
+      <!-- MCDI 트렌드 -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="user-select-label">선택된 사용자</div>
+            <div class="user-select-name" id="selectedUserName">사용자를 선택하세요</div>
+          </div>
+          <div style="font-size:10px;color:var(--text-sub);">MCDI 트렌드 (14일)</div>
+        </div>
+        <div class="card-body-pad">
+          <div class="trend-chart-wrap">
+            <canvas id="trendChart"></canvas>
+            <div class="no-data" id="trendNoData">← 사용자 행을 클릭하세요</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <script>
+    const BASE = '';
+    let trendChartInst = null;
+
+    // 날짜
+    const now = new Date();
+    document.getElementById('todayDate').textContent =
+      now.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
+
+    // 전체 로드
+    async function loadAll() {
+      document.getElementById('lastUpdated').textContent = '로딩 중…';
+      await Promise.all([loadSummary(), loadUsers(), loadHeatmap()]);
+      document.getElementById('lastUpdated').textContent =
+        '업데이트: ' + new Date().toLocaleTimeString('ko-KR');
+    }
+
+    // 1. 요약 카드
+    async function loadSummary() {
+      try {
+        const d = await (await fetch(`${BASE}/dashboard/summary`)).json();
+        document.getElementById('totalUsers').textContent = d.total_users ?? '—';
+        document.getElementById('todayActive').textContent = d.today_active ?? '—';
+        document.getElementById('dangerUsers').textContent = d.danger_users ?? '—';
+        document.getElementById('inactiveUsers').textContent = d.inactive_24h ?? '—';
+      } catch (e) { console.error(e); }
+    }
+
+    // 카테고리 한글 매핑
+    const CAT_MAP = {
+      reminiscence: '회상', daily_episodic: '일화', naming: '이름대기',
+      temporal: '시간', visual_linguistic: '그림읽기', non_verbal: '선택형'
+    };
+
+    // 2. 사용자 테이블
+    async function loadUsers() {
+      const wrap = document.getElementById('usersTableWrap');
+      wrap.innerHTML = '<div class="loading"><div class="spinner"></div>불러오는 중…</div>';
+      try {
+        const d = await (await fetch(`${BASE}/dashboard/users`)).json();
+        wrap.innerHTML = buildTable(d.users || []);
+        renderSparklines(d.users || []);
+      } catch (e) {
+        wrap.innerHTML = `<div class="error-msg">⛔ ${e.message}</div>`;
+      }
+    }
+
+    // 정렬 상태
+    let currentSort = { key: null, asc: true };
+    let cachedUsers = [];
+
+    // 정렬 키 → 값 추출
+    function sortValue(u, key) {
+      switch (key) {
+        case 'name': return u.name || '';
+        case 'onboarding': return u.onboarding_day || 0;
+        case 'mcdi': return u.latest_mcdi ?? -1;
+        case 'risk': {
+          const order = { RED: 0, ORANGE: 1, YELLOW: 2, GREEN: 3, UNKNOWN: 4 };
+          return order[u.latest_risk] ?? 9;
+        }
+        case 'today': return u.today_conversations || 0;
+        case 'last': return u.last_interaction || '';
+        case 'inactive': return u.is_inactive ? 1 : 0;
+        default: return '';
+      }
+    }
+
+    function sortTable(key) {
+      if (currentSort.key === key) { currentSort.asc = !currentSort.asc; }
+      else { currentSort.key = key; currentSort.asc = true; }
+      const sorted = [...cachedUsers].sort((a, b) => {
+        const va = sortValue(a, key), vb = sortValue(b, key);
+        if (va < vb) return currentSort.asc ? -1 : 1;
+        if (va > vb) return currentSort.asc ? 1 : -1;
+        return 0;
+      });
+      const wrap = document.getElementById('usersTableWrap');
+      wrap.innerHTML = buildTable(sorted, true);
+      // 헤더 아이콘 업데이트
+      document.querySelectorAll('thead th.sortable').forEach(th => {
+        th.classList.remove('sort-asc', 'sort-desc');
+        if (th.dataset.key === key) th.classList.add(currentSort.asc ? 'sort-asc' : 'sort-desc');
+      });
+      renderSparklines(sorted);
+    }
+
+    function renderSparklines(users) {
+      setTimeout(() => {
+        users.forEach(u => {
+          const cvs = document.getElementById(`spark-${u.user_id}`);
+          if (!cvs || !u.mcdi_trend?.length) return;
+          new Chart(cvs.getContext('2d'), {
+            type: 'line',
+            data: { labels: u.mcdi_trend.map((_, i) => i), datasets: [{ data: u.mcdi_trend, borderColor: riskColor(u.latest_risk), borderWidth: 1.5, pointRadius: u.mcdi_trend.length === 1 ? 2 : 0, tension: 0.4 }] },
+            options: { responsive: false, plugins: { legend: { display: false }, tooltip: { enabled: false } }, scales: { x: { display: false }, y: { display: false } }, animation: false }
+          });
+        });
+      }, 60);
+    }
+
+    function buildTable(users, noCache) {
+      if (!noCache) cachedUsers = users;
+      if (!users.length) return '<div class="loading">사용자 데이터 없음</div>';
+      const rows = users.map(u => {
+        const risk = u.latest_risk || 'UNKNOWN';
+        const mcdi = u.latest_mcdi != null ? u.latest_mcdi : '—';
+        const dot = u.is_inactive
+          ? '<span class="inactive-dot" title="24시간+ 미응답"></span>'
+          : '<span class="active-dot" title="오늘 활동"></span>';
+        const shortKey = u.kakao_channel_user_key
+          ? u.kakao_channel_user_key.slice(0, 8) + '…'
+          : u.user_id.slice(0, 8) + '…';
+        const lastTime = u.last_interaction
+          ? new Date(u.last_interaction).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+          : '—';
+        const catTag = u.last_category
+          ? `<div class="category-tag">${CAT_MAP[u.last_category] || u.last_category}</div>`
+          : '';
+        const lastMsg = u.last_message
+          ? `${catTag}<div class="last-msg"><em>사용자:</em> ${escHtml(u.last_message)}</div>`
+          : '<span style="color:var(--text-sub);font-size:10px;">대화 없음</span>';
+        const lastResp = u.last_response
+          ? `<div class="last-msg"><em>AI:</em> ${escHtml(u.last_response)}</div>`
+          : '';
+        const gardenLabel = u.garden_name
+          ? `<span style="color:var(--text-sub);font-size:9px;">🌿 ${escHtml(u.garden_name)}</span>`
+          : '';
+        return `
+      <tr onclick="selectUser('${u.user_id}','${escJs(u.name)}','${escJs(u.garden_name)}')" data-id="${u.user_id}">
+        <td style="min-width:130px">
+          ${dot}<span class="user-name">${escHtml(u.name)}</span>
+          ${gardenLabel}<br>
+          <span class="user-key" title="${u.kakao_channel_user_key || u.user_id}">🔑 ${shortKey}</span>
+        </td>
+        <td style="white-space:nowrap;font-size:11px">Day ${u.onboarding_day}</td>
+        <td style="font-weight:700;font-size:14px;white-space:nowrap">${mcdi}</td>
+        <td><span class="risk-badge risk-${risk}">${risk}</span></td>
+        <td style="text-align:center;font-size:12px">${u.today_conversations}</td>
+        <td style="white-space:nowrap;font-size:10px;color:var(--text-sub)">${lastTime}</td>
+        <td style="min-width:220px">${lastMsg}${lastResp}</td>
+        <td><canvas id="spark-${u.user_id}" class="sparkline-container" width="64" height="22"></canvas></td>
+      </tr>`;
+      }).join('');
+
+      const sortClass = (key) => {
+        if (currentSort.key !== key) return 'sortable';
+        return `sortable ${currentSort.asc ? 'sort-asc' : 'sort-desc'}`;
+      };
+
+      return `
+    <table>
+      <thead><tr>
+        <th class="${sortClass('name')}"    data-key="name"     onclick="sortTable('name')">이름 / 채널키</th>
+        <th class="${sortClass('onboarding')}" data-key="onboarding" onclick="sortTable('onboarding')">온보딩</th>
+        <th class="${sortClass('mcdi')}"    data-key="mcdi"     onclick="sortTable('mcdi')">MCDI</th>
+        <th class="${sortClass('risk')}"    data-key="risk"     onclick="sortTable('risk')">위험도</th>
+        <th class="${sortClass('today')}"   data-key="today"    onclick="sortTable('today')">오늘 대화</th>
+        <th class="${sortClass('last')}"    data-key="last"     onclick="sortTable('last')">마지막 대화 시각</th>
+        <th>마지막 대화 내용</th>
+        <th>추세</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+    }
+
+    // 3. MCDI 트렌드 차트
+    async function selectUser(userId, userName, gardenName) {
+      document.querySelectorAll('tbody tr').forEach(r => r.classList.remove('selected'));
+      const row = document.querySelector(`tr[data-id="${userId}"]`);
+      if (row) row.classList.add('selected');
+      document.getElementById('selectedUserName').textContent =
+        gardenName ? `${userName} · ${gardenName}` : userName;
+      document.getElementById('trendNoData').style.display = 'none';
+      try {
+        const d = await (await fetch(`${BASE}/dashboard/users/${userId}/trend?days=14`)).json();
+        if (d.error) {
+          document.getElementById('trendNoData').textContent = `오류: ${d.error}`;
+          document.getElementById('trendNoData').style.display = 'flex';
+          return;
+        }
+        if (trendChartInst) { trendChartInst.destroy(); trendChartInst = null; }
+        const ctx = document.getElementById('trendChart').getContext('2d');
+        trendChartInst = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: d.dates || [],
+            datasets: [
+              { label: 'MCDI', data: d.mcdi || [], borderColor: '#4d7cf4', backgroundColor: 'rgba(77,124,244,0.1)', fill: true, tension: 0.4, pointRadius: 3, pointBackgroundColor: '#4d7cf4' },
+              ...(d.baseline ? [{ label: 'Baseline', data: Array(d.dates?.length || 0).fill(d.baseline), borderColor: 'rgba(255,255,255,.2)', borderDash: [4, 4], borderWidth: 1, pointRadius: 0, fill: false }] : [])
+            ]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: '#7a89b0', font: { size: 10, family: 'Outfit' }, boxWidth: 10 } },
+              tooltip: { backgroundColor: '#1a2035', titleColor: '#e2e8f4', bodyColor: '#7a89b0', borderColor: 'rgba(100,120,200,.2)', borderWidth: 1 }
+            },
+            scales: {
+              x: { ticks: { color: '#7a89b0', font: { size: 9 } }, grid: { color: 'rgba(100,120,200,.06)' } },
+              y: { min: 0, max: 100, ticks: { color: '#7a89b0', font: { size: 9 } }, grid: { color: 'rgba(100,120,200,.08)' } }
+            }
+          }
+        });
+      } catch (e) {
+        document.getElementById('trendNoData').textContent = `오류: ${e.message}`;
+        document.getElementById('trendNoData').style.display = 'flex';
+      }
+    }
+
+    // 4. 히트맵
+    async function loadHeatmap() {
+      const wrap = document.getElementById('heatmapWrap');
+      wrap.innerHTML = '<div class="loading"><div class="spinner"></div>불러오는 중…</div>';
+      try {
+        const d = await (await fetch(`${BASE}/dashboard/heatmap?days=30`)).json();
+        wrap.innerHTML = buildHeatmap(d);
+      } catch (e) {
+        wrap.innerHTML = `<div class="error-msg">⛔ ${e.message}</div>`;
+      }
+    }
+
+    function buildHeatmap(data) {
+      if (!data.dates?.length) return '<div class="loading">데이터 없음</div>';
+      const dates = data.dates;
+      const dateLabels = dates.map((d, i) => {
+        if (i % 7 === 0) { const p = d.split('-'); return `<div class="heatmap-date-label">${parseInt(p[1])}/${parseInt(p[2])}</div>`; }
+        return '<div class="heatmap-date-label"></div>';
+      }).join('');
+      const rows = data.users.map(u => {
+        const cells = u.counts.map((cnt, i) => {
+          const c = Math.min(cnt, 5);
+          return `<div class="heatmap-cell" data-cnt="${c}" title="${dates[i]}: ${cnt}회"></div>`;
+        }).join('');
+        return `<div class="heatmap-row"><div class="heatmap-name" title="${u.name}">${u.name}</div><div class="heatmap-cells">${cells}</div></div>`;
+      }).join('');
+      return `<div class="heatmap-wrapper"><div class="heatmap-scroll">
+    <div class="heatmap-header"><div class="heatmap-label-col"></div><div class="heatmap-dates">${dateLabels}</div></div>
+    ${rows}</div></div>`;
+    }
+
+    // 유틸
+    function riskColor(r) { return { GREEN: '#00d68f', YELLOW: '#ffd166', ORANGE: '#ff9f43', RED: '#ff6b6b' }[r] || '#4d7cf4'; }
+    function escHtml(s) { return s ? (s + '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') : ''; }
+    function escJs(s) { return s ? (s + '').replace(/'/g, "\\'") : ''; };
+
+    loadAll();
+    setInterval(loadAll, 5 * 60 * 1000);
+  </script>
+</body>
+
+</html>

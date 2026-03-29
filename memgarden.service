@@ -1,0 +1,23 @@
+[Unit]
+Description=Memory Garden FastAPI Server
+After=network.target postgresql.service redis.service
+
+[Service]
+Type=simple
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/docker/MemoryGardenAI
+Environment="PATH=/home/admin/docker/MemoryGardenAI/.venv/bin"
+
+# FastAPI를 127.0.0.1:8000에만 바인딩 (localhost)
+ExecStart=/home/admin/docker/MemoryGardenAI/.venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000
+
+Restart=always
+RestartSec=10
+
+# 로깅
+StandardOutput=append:/home/admin/docker/MemoryGardenAI/logs/fastapi.log
+StandardError=append:/home/admin/docker/MemoryGardenAI/logs/fastapi-error.log
+
+[Install]
+WantedBy=multi-user.target

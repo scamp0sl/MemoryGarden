@@ -1,0 +1,25 @@
+--- MemoryGarden_new.html
++++ MemoryGarden_new.html
+@@ -699,6 +699,12 @@
+     }
+ 
+     /* MEDIA QUERIES */
++    @media (max-width: 992px) {
++        .mcdi-grid {
++            grid-template-columns: repeat(2, 1fr);
++        }
++    }
++
+     @media (max-width: 768px) {
+         .page-section {
+             padding: 60px 20px;
+@@ -708,6 +714,9 @@
+         .arch-diagram {
+             padding: 32px 24px;
+         }
++        .mcdi-grid {
++            grid-template-columns: 1fr;
++        }
+         .journey-step {
+             flex-direction: column;
+             text-align: center;

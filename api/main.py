@@ -39,6 +39,7 @@ from api.routes import (
     auth_router,
 )
 from api.routes.push import router as push_router
+from api.routes.dashboard import router as dashboard_router  # 대시보드
 
 logger = get_logger(__name__)
 
@@ -98,13 +99,20 @@ async def lifespan(app: FastAPI):
         # Qdrant 연결 테스트
         logger.info("📦 Initializing Qdrant connection...")
         try:
-            from database.qdrant import qdrant_client
-        except ImportError:
-            logger.warning("⚠️ Qdrant module not found (database/qdrant.py). Skipping initialization.")
-            raise ImportError("Qdrant module not implemented yet")
+            from database.qdrant_client import qdrant_manager
 
-        collections = await qdrant_client.get_collections()
-        logger.info(f"✅ Qdrant connection initialized ({len(collections.collections)} collections)")
+            await qdrant_manager.initialize()
+            client = qdrant_manager.client
+
+            if client:
+                collections = await client.get_collections()
+                logger.info(f"✅ Qdrant connection initialized ({len(collections.collections)} collections)")
+            else:
+                logger.warning("⚠️ Qdrant client is None (connection failed or disabled)")
+
+        except Exception as e:
+            logger.error(f"❌ Qdrant initialization error: {e}")
+            # Graceful degradation - continue without Qdrant
 
     except Exception as e:
         logger.error(f"❌ Failed to initialize Qdrant: {e}")
@@ -440,6 +448,7 @@ app.include_router(kakao_webhook_router)  # 카카오 Webhook
 app.include_router(kakao_oauth_router)  # 카카오 OAuth (기존)
 app.include_router(auth_router)  # 카카오 OAuth (신규, DB 저장)
 app.include_router(push_router)  # 푸시 알림
+app.include_router(dashboard_router)  # 대시보드
 
 
 # ============================================

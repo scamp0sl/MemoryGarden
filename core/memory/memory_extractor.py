@@ -91,6 +91,10 @@ class ExtractedMemory(BaseModel):
     importance: float = Field(..., ge=0.0, le=1.0, description="중요도")
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     metadata: Dict[str, Any] = Field(default_factory=dict, description="추가 메타데이터")
+    # C1: 에피소드 기억 확장 필드
+    samantha_emotion: Optional[str] = Field(None, description="사만다의 감정 상태 (예: 기쁨, 슬픔, 무관심)")
+    follow_up_notes: Optional[str] = Field(None, description="후속 추적을 위한 메모")
+    relationship_impact: Optional[float] = Field(None, ge=0.0, le=1.0, description="관계 영향도 (0.0~1.0)")
 
 
 class MemoryExtractionResult(BaseModel):
@@ -186,9 +190,11 @@ class MemoryExtractor:
             # 대화 히스토리를 텍스트로 변환
             formatted_history = self._format_conversation(conversation_history)
 
-            # LLM 호출하여 사실 추출
+            # LLM 호출하여 사실 추출 (현재 시간 포함)
+            current_time_str = current_datetime.strftime("%Y년 %m월 %d일 %H:%M")
             prompt = FACT_EXTRACTION_PROMPT.format(
-                conversation_history=formatted_history
+                conversation_history=formatted_history,
+                current_time=current_time_str
             )
 
             response = await self.llm_service.call_json(

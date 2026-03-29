@@ -1144,3 +1144,20 @@ def _get_time_based_greeting() -> str:
         return "좋은 저녁이에요! 🌙"
     else:
         return "편안한 밤 되세요! ✨"
+
+
+# ============================================
+# C5: Proactive Messaging
+# ============================================
+
+async def send_proactive_messages():
+    """Proactive 메시지 스케줄 태스크 (C5)
+
+    36시간 이상 비활성 사용자에게 자동 메시지 발송
+    """
+    from services.proactive_service import ProactiveService
+
+    service = ProactiveService()
+    result = await service.send_batch_proactive_messages(limit=10)
+    logger.info(f"Proactive messages sent: {result}")
+    return result

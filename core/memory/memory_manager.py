@@ -22,11 +22,21 @@ from uuid import uuid4
 # ============================================
 # 2. Third-Party Imports
 # ============================================
+import httpx
+from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct
 
 # ============================================
 # 3. Local Imports
 # ============================================
+from config.settings import settings
 from database.redis_client import redis_client
+from database.qdrant_client import (
+    qdrant_manager,
+    EPISODIC_COLLECTION,
+    BIOGRAPHICAL_COLLECTION,
+    SCORE_THRESHOLD,
+)
+from core.nlp.embedder import Embedder
 from core.memory.memory_extractor import (
     MemoryExtractor,
     MemoryExtractionResult,
@@ -89,11 +99,11 @@ class MemoryManager:
 
         Args:
             memory_extractor: 기억 추출기 (None이면 생성)
-            embedder: 임베딩 생성기 (벡터 검색용)
+            embedder: 임베딩 생성기 (벡터 검색용, None이면 생성)
             llm_service: LLM 서비스 (사실 추출용)
         """
         self.memory_extractor = memory_extractor or MemoryExtractor()
-        self.embedder = embedder
+        self.embedder = embedder or Embedder()
         self.llm_service = llm_service
         logger.info("MemoryManager initialized")
 
@@ -146,10 +156,35 @@ class MemoryManager:
             context={"emotion": analysis.get("emotion")}
         )
 
-        # 4계층 병렬 저장
+        # C1-3: 후속 화제 추출
+        follow_up_notes = await self._extract_follow_up_topics(message, response)
+
+        # C1-3: analysis에 follow_up_notes 추가
+        if follow_up_notes:
+            analysis = analysis or {}
+            analysis["follow_up_notes"] = follow_up_notes
+            logger.debug(f"Extracted {len(follow_up_notes)} follow-up topics")
+
+        # R-5: samantha_emotion 주입 (간단 키워드 매칭, LLM 호출 없음)
+        if not analysis.get("samantha_emotion"):
+            _emotion_keywords = {
+                "기쁨": ["기쁘", "좋아", "행복", "즐겁", "신나", "ㅋㅋ", "ㅎㅎ", "대박"],
+                "우울": ["슬프", "우울", "쓸쓸", "외롭", "ㅠㅠ", "ㅜㅜ"],
+                "분노": ["화나", "짜증", "속상", "억울", "미치"],
+                "불안": ["무섭", "두렵", "걱정"],
+                "피곤": ["피곤", "힘들", "지치"],
+            }
+            for _label, _kws in _emotion_keywords.items():
+                if any(kw in message for kw in _kws):
+                    analysis["samantha_emotion"] = _label
+                    break
+            else:
+                analysis["samantha_emotion"] = "중립"
+
+        # 4계층 병렬 저장 (C1-2: analysis 전달 for emotion intensity filter)
         results = await asyncio.gather(
             self._store_session_memory(user_id, message, response),
-            self._store_episodic_memories(user_id, extraction_result),
+            self._store_episodic_memories(user_id, extraction_result, analysis),
             self._store_biographical_facts(user_id, extraction_result),
             self._store_analytical_data(user_id, analysis),
             return_exceptions=True
@@ -307,43 +342,231 @@ class MemoryManager:
             return {}
 
     # ============================================
+    # C1-3: 후속 화제 추출 헬퍼
+    # ============================================
+
+    async def _extract_follow_up_topics(
+        self,
+        user_message: str,
+        assistant_message: str
+    ) -> List[str]:
+        """대화에서 후속 화제 추출 (C1-3)
+
+        다음 패턴에서 후속 화제 추출:
+        1. 사용자가 던진 질문 (나중에 답변 가능한 것들)
+        2. "다음에", "나중에" 등의 미래 표현이 있는 문맥
+        3. 미완성 대화 (단답형 응답 후 확장 가능한 주제)
+
+        Args:
+            user_message: 사용자 메시지
+            assistant_message: AI 응답
+
+        Returns:
+            후속 화제 리스트 (최대 3개)
+        """
+        import re
+
+        follow_ups = []
+
+        # 패턴 1: 사용자 메시지의 질문식 표현
+        # TODO, 물음표 등 포함
+        question_patterns = [
+            r"(?:할|가고|먹고|보고|하고 싶은|하고 있는)[\s\S]{1,20}",
+            r"(?:좋아하는|즐겨하는|자주 가는|자주 하는)[\s\S]{1,20}",
+            r"(?:어떻게|언제|어디서|무엇을|누구와)[\s\S]{1,20}",
+        ]
+        for pattern in question_patterns:
+            matches = re.findall(pattern, user_message)
+            for match in matches[:2]:  # 패턴당 최대 2개
+                cleaned = match.strip(" ?.!,'")
+                if len(cleaned) >= 2 and cleaned not in follow_ups:
+                    follow_ups.append(cleaned)
+
+        # 패턴 2: 미래 표현 키워드
+        future_keywords = ["다음에", "나중에", "다음 번", "곧", "이따가", "내일"]
+        for keyword in future_keywords:
+            if keyword in user_message or keyword in assistant_message:
+                # 키워드 주변 문맥 추출
+                idx = max(user_message.find(keyword), assistant_message.find(keyword))
+                context = (user_message + " " + assistant_message)[max(0, idx-10):idx+20]
+                # 너무 길면 잘라서 저장
+                context = context[:30]
+                if context and context not in follow_ups:
+                    follow_ups.append(f"{keyword} 관련 대화")
+
+        # 패턴 3: 짧은 응답 후 확장 가능한 주제 (사용자 메시지가 20자 이하)
+        if len(user_message) <= 20 and len(follow_ups) < 3:
+            # 사용자 메시지 자체를 후속 화제로 저장
+            cleaned = user_message.strip(" ?.!,'")
+            if len(cleaned) >= 2:
+                follow_ups.append(f"더 이야기 나누고 싶은 주제: {cleaned}")
+
+        # 최대 3개로 제한
+        return follow_ups[:3]
+
+    async def _generate_follow_up_note_async(
+        self,
+        memory_content: str,
+        user_emotion: Optional[str] = None
+    ) -> Optional[str]:
+        """LLM 기반 후속 추적 메모 생성 (C1)
+
+        Args:
+            memory_content: 기억 내용
+            user_emotion: 사용자 감정 (선택사항)
+
+        Returns:
+            후속 추적 메모 (None 가능)
+        """
+        try:
+            from services.llm_service import default_llm_service
+
+            prompt = f"""다음 사용자 기억을 바탕으로, 추후 대화 시 다시 물어볼 만한 후속 추적 메모를 한 문장으로 작성해주세요.
+
+기억 내용: {memory_content}
+사용자 감정: {user_emotion or "정보 없음"}
+
+가이드라인:
+- 1문장으로 간결하게
+- 구체적인 질문 형태 (예: "OOO에 대해 다시 물어보기")
+- 사용자의 감정 상태를 고려한 표현
+
+후속 추적 메모:"""
+
+            llm_service = default_llm_service
+            response = await llm_service.call(prompt, max_tokens=100, temperature=0.7)
+
+            # 응답 정리
+            note = response.strip(" .\n")
+            if note and len(note) >= 5:
+                logger.debug(f"Generated follow-up note: {note}")
+                return note
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to generate follow-up note: {e}")
+            return None
+
+    # ============================================
     # Layer 2: Episodic Memory (Qdrant)
     # ============================================
 
     async def _store_episodic_memories(
         self,
         user_id: str,
-        extraction_result: MemoryExtractionResult
+        extraction_result: MemoryExtractionResult,
+        analysis: Optional[Dict[str, Any]] = None
     ) -> int:
-        """Episodic Memory 저장 (Qdrant)"""
+        """
+        Episodic Memory 저장
+
+        Qdrant 가용 시: 벡터 임베딩 + Qdrant upsert
+        Qdrant 불가 시: Redis 임시 저장 (fallback)
+        """
         try:
+            if not extraction_result.episodic_memories:
+                return 0
+
             stored_count = 0
 
-            # TODO: Qdrant 연동
-            # 현재는 Redis에 임시 저장
-            for memory in extraction_result.episodic_memories:
-                memory_id = str(uuid4())
-                cache_key = f"episodic:{user_id}:{memory_id}"
+            # Qdrant 초기화 (최초 1회 또는 연결이 끊어졌을 때)
+            await qdrant_manager.initialize()
+            client = qdrant_manager.client
 
-                memory_data = {
-                    "id": memory_id,
-                    "user_id": user_id,
-                    "content": memory.content,
-                    "category": memory.category.value,
-                    "confidence": memory.confidence,
-                    "importance": memory.importance,
-                    "timestamp": memory.timestamp,
-                    "metadata": memory.metadata
-                }
+            # C1-2: 감정 벡터에서 valence 추출
+            emotion_vector = analysis.get("emotion_vector", {}) if analysis else {}
+            valence = emotion_vector.get("v", 0.0)
+            valence_intensity = abs(valence)
 
-                await redis_client.set_json(
-                    cache_key,
-                    memory_data,
-                    ttl=86400 * 30  # 30일
+            # C1-3: 후속 화제 메타데이터
+            follow_up_notes = analysis.get("follow_up_notes", []) if analysis else []
+            samantha_emotion = analysis.get("samantha_emotion") if analysis else None
+
+            if client is not None:
+                # ---- Qdrant 저장 ----
+                points = []
+                for memory in extraction_result.episodic_memories:
+                    # C1-2: 감정 강도 필터
+                    if valence_intensity < 0.4 and memory.importance < 0.6:
+                        logger.debug(
+                            f"Skipped ordinary conversation: valence={valence:.2f}, "
+                            f"importance={memory.importance:.2f}"
+                        )
+                        continue
+
+                    try:
+                        vector = await self.embedder.embed(memory.content)
+                        point_id = str(uuid4())
+
+                        # C1-1: 서사 강화 필드 추가
+                        enhanced_metadata = {
+                            "samantha_emotion": samantha_emotion,
+                            "follow_up_notes": follow_up_notes,
+                            **memory.metadata
+                        }
+
+                        points.append(PointStruct(
+                            id=point_id,
+                            vector=vector.tolist(),
+                            payload={
+                                "user_id": user_id,
+                                "content": memory.content,
+                                "category": memory.category.value,
+                                "confidence": memory.confidence,
+                                "importance": memory.importance,
+                                "timestamp": memory.timestamp,
+                                "metadata": enhanced_metadata,
+                            }
+                        ))
+                    except Exception as e:
+                        logger.warning(f"Failed to embed episodic memory: {e}")
+
+                if points:
+                    await client.upsert(
+                        collection_name=EPISODIC_COLLECTION,
+                        points=points,
+                    )
+                    stored_count = len(points)
+                    logger.debug(
+                        f"Stored {stored_count} episodic memories to Qdrant for {user_id}"
+                    )
+
+            else:
+                # ---- Redis fallback ----
+                for memory in extraction_result.episodic_memories:
+                    # C1-2: 감정 강도 필터
+                    if valence_intensity < 0.4 and memory.importance < 0.6:
+                        continue
+
+                    memory_id = str(uuid4())
+                    cache_key = f"episodic:{user_id}:{memory_id}"
+
+                    enhanced_metadata = {
+                        "samantha_emotion": samantha_emotion,
+                        "follow_up_notes": follow_up_notes,
+                        **memory.metadata
+                    }
+
+                    await redis_client.set_json(
+                        cache_key,
+                        {
+                            "id": memory_id,
+                            "user_id": user_id,
+                            "content": memory.content,
+                            "category": memory.category.value,
+                            "confidence": memory.confidence,
+                            "importance": memory.importance,
+                            "timestamp": memory.timestamp,
+                            "metadata": enhanced_metadata,
+                        },
+                        ttl=86400 * 30,
+                    )
+                    stored_count += 1
+                logger.debug(
+                    f"Stored {stored_count} episodic memories to Redis (fallback) for {user_id}"
                 )
-                stored_count += 1
 
-            logger.debug(f"Stored {stored_count} episodic memories for {user_id}")
             return stored_count
 
         except Exception as e:
@@ -356,52 +579,90 @@ class MemoryManager:
         query: Optional[str],
         limit: int
     ) -> List[Dict[str, Any]]:
-        """Episodic Memory 검색 (Qdrant)"""
+        """
+        Episodic Memory 검색
+
+        Qdrant 가용 시:
+          - query 있음 → 벡터 유사도 검색 (cosine ≥ SCORE_THRESHOLD)
+          - query 없음 → scroll (최근 N개)
+        Qdrant 불가 시: 빈 리스트 반환
+        """
         try:
-            memories = []
+            # Qdrant 초기화
+            await qdrant_manager.initialize()
+            client = qdrant_manager.client
+            if client is None:
+                logger.debug("Qdrant unavailable, skipping episodic retrieval")
+                return []
 
-            # TODO: Qdrant 벡터 검색 구현
-            # 실제 구현 예시:
-            # if query and self.embedder:
-            #     # 쿼리 임베딩
-            #     query_vector = await self.embedder.embed(query)
-            #
-            #     # Qdrant 검색
-            #     from qdrant_client.models import Filter, FieldCondition
-            #     results = qdrant_client.search(
-            #         collection_name=EPISODIC_COLLECTION,
-            #         query_vector=query_vector,
-            #         query_filter=Filter(
-            #             must=[FieldCondition(key="user_id", match={"value": user_id})]
-            #         ),
-            #         limit=limit,
-            #         score_threshold=0.7
-            #     )
-            #
-            #     memories = [
-            #         {
-            #             "content": hit.payload["content"],
-            #             "timestamp": hit.payload["timestamp"],
-            #             "category": hit.payload.get("category"),
-            #             "score": hit.score
-            #         }
-            #         for hit in results
-            #     ]
-            # else:
-            #     # 쿼리 없이 최근 순으로
-            #     results = qdrant_client.scroll(
-            #         collection_name=EPISODIC_COLLECTION,
-            #         scroll_filter=Filter(
-            #             must=[FieldCondition(key="user_id", match={"value": user_id})]
-            #         ),
-            #         limit=limit,
-            #         order_by="timestamp"
-            #     )
-            #     memories = [point.payload for point in results[0]]
+            user_filter = Filter(
+                must=[FieldCondition(
+                    key="user_id",
+                    match=MatchValue(value=user_id)
+                )]
+            )
 
-            # 현재는 Redis에서 임시 검색
-            logger.debug(f"Retrieved {len(memories)} episodic memories (mock)")
+            if query:
+                # Qdrant 1.7.4 호환: 직접 REST API 사용
+                # (client library 1.17.1와 server 1.7.4의 API 불일치 문제 해결)
+                query_vector = await self.embedder.embed(query)
 
+                async with httpx.AsyncClient(timeout=30.0) as http:
+                    response = await http.post(
+                        f"{settings.QDRANT_URL}/collections/{EPISODIC_COLLECTION}/points/search",
+                        json={
+                            "vector": query_vector.tolist(),
+                            "filter": {
+                                "must": [
+                                    {"key": "user_id", "match": {"value": user_id}}
+                                ]
+                            },
+                            "limit": limit,
+                            "with_payload": True,
+                            "score_threshold": SCORE_THRESHOLD
+                        }
+                    )
+
+                    if response.status_code == 200:
+                        search_result = response.json().get("result", [])
+                        memories = [
+                            {
+                                "content": hit.get("payload", {}).get("content", ""),
+                                "timestamp": hit.get("payload", {}).get("timestamp", ""),
+                                "category": hit.get("payload", {}).get("category"),
+                                "confidence": hit.get("payload", {}).get("confidence", 1.0),
+                                "importance": hit.get("payload", {}).get("importance", 0.5),
+                                "metadata": hit.get("payload", {}).get("metadata", {}),
+                                "score": hit.get("score", 1.0),
+                            }
+                            for hit in search_result
+                        ]
+                    else:
+                        logger.warning(f"Qdrant search failed: {response.status_code}")
+                        return []
+            else:
+                # 쿼리 없이 최근 순으로 scroll
+                results, _ = await client.scroll(
+                    collection_name=EPISODIC_COLLECTION,
+                    scroll_filter=user_filter,
+                    limit=limit,
+                    with_payload=True,
+                )
+                memories = [
+                    {
+                        "content": p.payload.get("content", ""),
+                        "timestamp": p.payload.get("timestamp", ""),
+                        "category": p.payload.get("category"),
+                        "confidence": p.payload.get("confidence", 1.0),
+                        "importance": p.payload.get("importance", 0.5),
+                        "metadata": p.payload.get("metadata", {}),
+                    }
+                    for p in results
+                ]
+                # timestamp 역순 정렬 (최신 우선)
+                memories.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+
+            logger.debug(f"Retrieved {len(memories)} episodic memories for {user_id}")
             return memories
 
         except Exception as e:
@@ -417,30 +678,61 @@ class MemoryManager:
         user_id: str,
         extraction_result: MemoryExtractionResult
     ) -> int:
-        """Biographical Memory 저장"""
+        """
+        Biographical Memory 저장
+
+        Qdrant: 의미 검색용 벡터 저장 (entity+value 임베딩)
+        Redis: 빠른 키-값 조회용 캐시 (entity 기준)
+        """
         try:
+            if not extraction_result.biographical_facts:
+                return 0
+
             stored_count = 0
 
-            # TODO: PostgreSQL 및 Qdrant 연동
-            # 현재는 Redis에 임시 저장
-            for fact in extraction_result.biographical_facts:
-                cache_key = f"biographical:{user_id}:{fact.entity}"
+            # Qdrant 초기화
+            await qdrant_manager.initialize()
+            client = qdrant_manager.client
 
+            for fact in extraction_result.biographical_facts:
                 fact_data = {
+                    "user_id": user_id,
                     "entity": fact.entity,
                     "value": fact.value,
                     "category": fact.category.value,
                     "fact_type": fact.fact_type.value,
                     "confidence": fact.confidence,
                     "context": fact.context,
-                    "timestamp": fact.timestamp
+                    "timestamp": fact.timestamp,
                 }
 
+                # Redis에 항상 저장 (빠른 조회)
+                cache_key = f"biographical:{user_id}:{fact.entity}"
                 await redis_client.set_json(
                     cache_key,
                     fact_data,
-                    ttl=86400 * 365  # 1년
+                    ttl=86400 * 365,  # 1년
                 )
+
+                # Qdrant에도 저장 (의미 검색)
+                if client is not None:
+                    try:
+                        embed_text = f"{fact.entity}: {fact.value}"
+                        vector = await self.embedder.embed(embed_text)
+                        point_id = str(uuid4())
+                        await client.upsert(
+                            collection_name=BIOGRAPHICAL_COLLECTION,
+                            points=[PointStruct(
+                                id=point_id,
+                                vector=vector.tolist(),
+                                payload=fact_data,
+                            )],
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to store biographical fact to Qdrant: {e}"
+                        )
+
                 stored_count += 1
 
             logger.debug(f"Stored {stored_count} biographical facts for {user_id}")
@@ -454,15 +746,25 @@ class MemoryManager:
         self,
         user_id: str
     ) -> Dict[str, Any]:
-        """Biographical Memory 검색"""
+        """
+        Biographical Memory 검색
+
+        Redis에서 해당 사용자의 모든 biographical 키를 가져옵니다.
+        """
         try:
-            # TODO: PostgreSQL 쿼리 구현
-            # 현재는 Redis에서 검색 (임시)
             facts = {}
 
-            # Mock data
-            logger.debug(f"Retrieved biographical facts for {user_id} (mock)")
+            # Redis에서 패턴 매칭으로 검색
+            pattern = f"biographical:{user_id}:*"
+            keys = await redis_client.keys(pattern)
 
+            for key in keys:
+                fact_data = await redis_client.get_json(key)
+                if fact_data:
+                    entity = fact_data.get("entity", "")
+                    facts[entity] = fact_data
+
+            logger.debug(f"Retrieved {len(facts)} biographical facts for {user_id}")
             return facts
 
         except Exception as e:
@@ -766,6 +1068,105 @@ class MemoryManager:
         )
 
         return memories[:limit]
+
+    async def get_mcdi_analytics(
+        self,
+        user_id: str,
+        days: int = 14
+    ) -> Dict[str, Any]:
+        """
+        MCDI 분석 데이터 조회 (어댑티브 대화용)
+
+        최신 MCDI 점수, 위험도, 6개 지표 점수, 추이 등을 반환.
+
+        Args:
+            user_id: 사용자 ID
+            days: 조회 기간 (기본 14일)
+
+        Returns:
+            {
+                "latest_risk_level": "GREEN",
+                "latest_mcdi_score": 78.5,
+                "score_trend": "stable",  # improving, stable, declining
+                "slope_per_week": -0.5,
+                "latest_scores": {
+                    "LR": 80.0, "SD": 75.0, "NC": 82.0,
+                    "TO": 78.0, "ER": 76.0, "RT": 70.0
+                },
+                "has_data": True
+            }
+
+        Example:
+            >>> manager = MemoryManager()
+            >>> analytics = await manager.get_mcdi_analytics("user123")
+            >>> print(analytics["latest_risk_level"])
+            'GREEN'
+        """
+        logger.debug(f"Retrieving MCDI analytics for user {user_id} (last {days} days)")
+
+        analytics_data = {
+            "latest_risk_level": "GREEN",
+            "latest_mcdi_score": None,
+            "score_trend": "stable",
+            "slope_per_week": 0.0,
+            "latest_scores": {},
+            "has_data": False
+        }
+
+        try:
+            # TimescaleDB에서 최신 MCDI 데이터 조회
+            from database.timescale import get_timescale
+            timescale = await get_timescale()
+
+            # 최신 분석 결과 조회
+            latest_result = await timescale.get_latest_mcdi(user_id)
+
+            if latest_result:
+                analytics_data["latest_risk_level"] = latest_result.get("risk_level", "GREEN")
+                analytics_data["latest_mcdi_score"] = latest_result.get("mcdi_score")
+                analytics_data["latest_scores"] = {
+                    "LR": latest_result.get("lr_score"),
+                    "SD": latest_result.get("sd_score"),
+                    "NC": latest_result.get("nc_score"),
+                    "TO": latest_result.get("to_score"),
+                    "ER": latest_result.get("er_score"),
+                    "RT": latest_result.get("rt_score")
+                }
+                analytics_data["has_data"] = True
+
+                # 최근 N일 점수 추이 계산
+                recent_scores = await timescale.get_mcdi_history(user_id, days=days)
+                if len(recent_scores) >= 2:
+                    # 단순 선형 회귀로 추이 추정 (첫 점수 vs 마지막 점수)
+                    first_score = recent_scores[0].get("mcdi_score", 0)
+                    last_score = recent_scores[-1].get("mcdi_score", 0)
+
+                    if last_score > first_score + 2:
+                        analytics_data["score_trend"] = "improving"
+                    elif last_score < first_score - 2:
+                        analytics_data["score_trend"] = "declining"
+
+                    # 주당 변화율 (slope)
+                    days_span = max(1, days)  # 0으로 나누기 방지
+                    analytics_data["slope_per_week"] = round(
+                        (last_score - first_score) / days_span * 7, 2
+                    )
+
+                logger.info(
+                    f"MCDI analytics retrieved for {user_id}",
+                    extra={
+                        "risk_level": analytics_data["latest_risk_level"],
+                        "mcdi_score": analytics_data["latest_mcdi_score"],
+                        "trend": analytics_data["score_trend"]
+                    }
+                )
+            else:
+                logger.debug(f"No MCDI data found for user {user_id}")
+
+        except Exception as e:
+            logger.warning(f"Failed to retrieve MCDI analytics for {user_id}: {e}")
+
+        return analytics_data
 
 
 # ============================================

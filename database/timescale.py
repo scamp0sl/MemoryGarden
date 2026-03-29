@@ -622,6 +622,149 @@ class TimescaleDB:
             logger.error(f"Failed to get aggregate stats: {e}", exc_info=True)
             raise DatabaseError(f"Aggregate stats retrieval failed: {e}") from e
 
+    # ============================================
+    # 어댑티브 대화 지원 메서드 (B3-1)
+    # ============================================
+
+    async def get_latest_mcdi(
+        self,
+        user_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        최신 MCDI 분석 결과 조회 (어댑티브 대화용)
+
+        가장 최근 MCDI 점수와 6개 지표 점수를 반환합니다.
+
+        Args:
+            user_id: 사용자 ID
+
+        Returns:
+            최신 MCDI 데이터 또는 None
+            {
+                "mcdi_score": 78.5,
+                "risk_level": "GREEN",
+                "lr_score": 80.0,
+                "sd_score": 75.0,
+                "nc_score": 82.0,
+                "to_score": 78.0,
+                "er_score": 76.0,
+                "rt_score": 70.0,
+                "timestamp": "2025-03-26T10:30:00"
+            }
+            또는 None (데이터 없음)
+
+        Example:
+            >>> latest = await timescale.get_latest_mcdi("user_123")
+            >>> if latest:
+            ...     print(f"Risk: {latest['risk_level']}, Score: {latest['mcdi_score']}")
+        """
+        if not self.pool:
+            await self.connect()
+
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT
+                        mcdi_score,
+                        risk_level,
+                        lr_score, sd_score, nc_score,
+                        to_score, er_score, rt_score,
+                        timestamp
+                    FROM analysis_timeseries
+                    WHERE user_id = $1
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """,
+                    user_id
+                )
+
+            if row is None:
+                logger.debug(f"No MCDI data found for user {user_id}")
+                return None
+
+            return {
+                "mcdi_score": float(row["mcdi_score"]) if row["mcdi_score"] else None,
+                "risk_level": row["risk_level"] or "GREEN",
+                "lr_score": float(row["lr_score"]) if row["lr_score"] else None,
+                "sd_score": float(row["sd_score"]) if row["sd_score"] else None,
+                "nc_score": float(row["nc_score"]) if row["nc_score"] else None,
+                "to_score": float(row["to_score"]) if row["to_score"] else None,
+                "er_score": float(row["er_score"]) if row["er_score"] else None,
+                "rt_score": float(row["rt_score"]) if row["rt_score"] else None,
+                "timestamp": row["timestamp"].isoformat() if row["timestamp"] else None
+            }
+
+        except Exception as e:
+            logger.warning(f"Failed to get latest MCDI for {user_id}: {e}")
+            return None
+
+    async def get_mcdi_history(
+        self,
+        user_id: str,
+        days: int = 14
+    ) -> List[Dict[str, Any]]:
+        """
+        MCDI 점수 히스토리 조회 (추이 분석용)
+
+        최근 N일간의 MCDI 점수 목록을 시간 순서대로 반환합니다.
+
+        Args:
+            user_id: 사용자 ID
+            days: 조회 기간 (일)
+
+        Returns:
+            MCDI 히스토리 리스트 (오래된 순)
+            [
+                {"mcdi_score": 80.0, "timestamp": "2025-03-12T10:00:00"},
+                {"mcdi_score": 78.5, "timestamp": "2025-03-13T10:00:00"},
+                ...
+            ]
+
+        Example:
+            >>> history = await timescale.get_mcdi_history("user_123", days=14)
+            >>> scores = [h["mcdi_score"] for h in history]
+        """
+        if not self.pool:
+            await self.connect()
+
+        try:
+            cutoff_time = datetime.now() - timedelta(days=days)
+
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT
+                        mcdi_score,
+                        timestamp
+                    FROM analysis_timeseries
+                    WHERE user_id = $1
+                      AND timestamp >= $2
+                      AND mcdi_score IS NOT NULL
+                    ORDER BY timestamp ASC
+                    """,
+                    user_id,
+                    cutoff_time
+                )
+
+            history = [
+                {
+                    "mcdi_score": float(row["mcdi_score"]),
+                    "timestamp": row["timestamp"].isoformat()
+                }
+                for row in rows
+            ]
+
+            logger.debug(
+                f"Retrieved {len(history)} MCDI history points for user {user_id}"
+            )
+
+            return history
+
+        except Exception as e:
+            logger.warning(f"Failed to get MCDI history for {user_id}: {e}")
+            return []
+
 
 # ============================================
 # 싱글톤 인스턴스

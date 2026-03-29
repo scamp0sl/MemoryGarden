@@ -129,6 +129,8 @@ FACT_EXTRACTION_PROMPT = """
 대화에서 저장할 가치가 있는 사실(fact)을 추출하세요.
 
 ## 입력
+- 현재 시간: {current_time}
+
 {conversation_history}
 
 ## 추출 대상
@@ -166,7 +168,7 @@ FACT_EXTRACTION_PROMPT = """
   "episodic_facts": [
     {{
       "content": "2025-01-15 점심에 된장찌개와 김치, 멸치볶음 먹음",
-      "timestamp": "2025-01-15T12:30:00Z",
+      "timestamp": "{current_time}",
       "category": "food",
       "confidence": 0.9
     }}

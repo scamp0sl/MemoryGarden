@@ -48,6 +48,11 @@ class User(Base):
     # 카카오 채널 챗봇 사용자 키 (2026-02-24 추가)
     kakao_channel_user_key = Column(String(255), unique=True, nullable=True, index=True)
 
+    # 온보딩 및 정원 정보 (2026-02-27 추가)
+    garden_name = Column(String(100), nullable=True)
+    onboarding_day = Column(Integer, default=0, nullable=False)
+    last_interaction_at = Column(DateTime, nullable=True)
+
     # 타임스탬프
     created_at = Column(DateTime, default=datetime.now, index=True)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
@@ -57,6 +62,7 @@ class User(Base):
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
     analysis_results = relationship("AnalysisResult", back_populates="user", cascade="all, delete-orphan")
     fcm_tokens = relationship("FCMToken", back_populates="user", cascade="all, delete-orphan")
+    garden_status = relationship("GardenStatus", back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
 # ============================================
@@ -186,6 +192,36 @@ class FCMToken(Base):
 
 
 # ============================================
+# GardenStatus 모델
+# ============================================
+
+class GardenStatus(Base):
+    """정원 상태 테이블 (게이미피케이션)"""
+    __tablename__ = "garden_status"
+
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+
+    # 정원 아이템
+    flower_count = Column(Integer, default=0, nullable=False)
+    butterfly_count = Column(Integer, default=0, nullable=False)
+
+    # 연속 일수
+    consecutive_days = Column(Integer, default=0, nullable=False)
+    total_conversations = Column(Integer, default=0, nullable=False)
+
+    # 레벨 및 배지
+    garden_level = Column(Integer, default=1, nullable=False)
+    season_badge = Column(String(50), nullable=True)
+
+    # 타임스탬프
+    last_interaction_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    # Relationships
+    user = relationship("User", back_populates="garden_status")
+
+
+# ============================================
 # Export
 # ============================================
 __all__ = [
@@ -194,4 +230,5 @@ __all__ = [
     "Conversation",
     "AnalysisResult",
     "FCMToken",
+    "GardenStatus",
 ]

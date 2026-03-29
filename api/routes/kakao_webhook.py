@@ -5,9 +5,12 @@
 AI 응답 생성 + 대화 DB 저장 + MCDI 분석 (백그라운드).
 """
 
+import asyncio
+import hashlib
 import time
 from typing import Dict, Any
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Request, Depends, BackgroundTasks
 from fastapi.responses import RedirectResponse
@@ -18,6 +21,7 @@ from database.postgres import get_db, AsyncSessionLocal
 from database.models import User, Conversation, AnalysisResult
 from database.redis_client import redis_client
 from core.dialogue.dialogue_manager import DialogueManager
+from core.dialogue.time_aware import TimeAwareDialogue  # B4-1: Gap 메시지 생성
 from core.analysis.analyzer import Analyzer
 from services.llm_service import LLMService
 from services.image_analysis_service import get_image_analysis_service
@@ -386,8 +390,302 @@ async def _run_mcdi_analysis(
             except Exception as ge:
                 logger.warning(f"게이미피케이션 업데이트 실패 (무시): {ge}")
 
+            # ============================================
+            # 4계층 메모리 저장 (Episodic → Qdrant, Biographical → Qdrant+Redis)
+            # ============================================
+            try:
+                from core.memory.memory_manager import MemoryManager
+                from core.nlp.embedder import Embedder
+                from sqlalchemy import select
+
+                # 대화 응답 가져오기 (conversation_id로 조회)
+                conv_result = await db.execute(
+                    select(Conversation).where(Conversation.id == conversation_id)
+                )
+                conversation = conv_result.scalar_one_or_none()
+                ai_response = conversation.response if conversation else ""
+
+                # 4계층 메모리 저장 (store_all이 내부적으로 추출 처리)
+                memory_manager = MemoryManager(embedder=Embedder())
+
+                # 분석 결과를 통합
+                analysis_with_emotion = result.copy()
+                # 감정 벡터가 없으면 기본값 추가
+                if "emotion_vector" not in analysis_with_emotion:
+                    analysis_with_emotion["emotion_vector"] = {
+                        "v": 0.5, "a": 0.3, "i": 0.5  # 중립 감정
+                    }
+
+                stored = await memory_manager.store_all(
+                    user_id=str(user_id),
+                    message=message,
+                    response=ai_response,
+                    analysis=analysis_with_emotion
+                )
+
+                logger.info(
+                    f"4계층 메모리 저장 완료",
+                    extra={
+                        "user_id": user_id,
+                        "stored_episodic": stored.get("episodic_stored", 0),
+                        "stored_biographical": stored.get("biographical_stored", 0),
+                        "session_stored": stored.get("session_stored", False)
+                    }
+                )
+
+            except Exception as me:
+                logger.warning(f"메모리 저장 실패 (무시): {me}", exc_info=True)
+
     except Exception as e:
         logger.error(f"MCDI 분석 실패 - user: {user_id}: {e}", exc_info=True)
+
+
+# ── MCDI 컨텍스트 조회 (B3-1) ─────────────────────────
+
+async def _get_mcdi_context(user_id: str) -> dict:
+    """
+    MCDI 컨텍스트 캐시 조회 (5분 TTL)
+
+    Redis 캐시 우선 확인 후, 캐시 miss 시 TimescaleDB 조회.
+    slope < -2.0이면 risk_level 한 단계 상향 조정.
+
+    Args:
+        user_id: 사용자 ID
+
+    Returns:
+        MCDI 컨텍스트 딕셔너리
+        {
+            "latest_risk_level": "GREEN",
+            "latest_mcdi_score": 78.5,
+            "score_trend": "stable",
+            "slope_per_week": -0.5,
+            "latest_scores": {"LR": 80.0, "SD": 75.0, ...},
+            "has_data": False
+        }
+
+    Example:
+        >>> ctx = await _get_mcdi_context("user_123")
+        >>> print(ctx["latest_risk_level"])
+        'GREEN'
+    """
+    logger.info(f"[MCDI_CONTEXT] _get_mcdi_context called for user_id: {user_id}")
+    cache_key = f"mcdi_context:{user_id}"
+
+    # 1. Redis 캐시 우선 확인
+    try:
+        cached = await redis_client.get_json(cache_key)
+        if cached:
+            logger.debug(f"MCDI context cache hit for user {user_id}")
+            # B3-6: 캐시에서도 slope 체크 (조기 경보)
+            level_map = {"GREEN": 0, "YELLOW": 1, "ORANGE": 2, "RED": 3}
+            rev_map = {0: "GREEN", 1: "YELLOW", 2: "ORANGE", 3: "RED"}
+            slope = cached.get("slope_per_week", 0.0)
+            if slope and slope < -2.0:
+                current_idx = level_map.get(cached.get("latest_risk_level", "GREEN"), 0)
+                cached["latest_risk_level"] = rev_map.get(min(current_idx + 1, 3), "RED")
+                logger.info(
+                    f"Early warning (cached): slope {slope} < -2.0, "
+                    f"upgrading risk to {cached['latest_risk_level']}"
+                )
+                # 캐시 업데이트
+                await redis_client.set_json(cache_key, cached, ttl=300)
+            return cached
+    except Exception as e:
+        logger.warning(f"Redis cache read failed: {e}")
+
+    # 2. 캐시 없으면 TimescaleDB 조회
+    try:
+        from core.memory.memory_manager import MemoryManager
+        mm = MemoryManager()
+        analytics = await mm.get_mcdi_analytics(user_id, days=14)
+
+        context = {
+            "latest_risk_level": analytics.get("latest_risk_level", "GREEN"),
+            "latest_mcdi_score": analytics.get("latest_mcdi_score"),
+            "score_trend": analytics.get("score_trend", "stable"),
+            "slope_per_week": analytics.get("slope_per_week", 0.0),
+            "latest_scores": analytics.get("latest_scores", {}),
+            "has_data": analytics.get("has_data", False)
+        }
+
+        # 조기 경보: slope < -2.0이면 risk_level 한 단계 상향
+        level_map = {"GREEN": 0, "YELLOW": 1, "ORANGE": 2, "RED": 3}
+        rev_map = {0: "GREEN", 1: "YELLOW", 2: "ORANGE", 3: "RED"}
+        if context["slope_per_week"] and context["slope_per_week"] < -2.0:
+            current_idx = level_map.get(context["latest_risk_level"], 0)
+            context["latest_risk_level"] = rev_map.get(min(current_idx + 1, 3), "RED")
+            logger.info(
+                f"Early warning: slope {context['slope_per_week']} < -2.0, "
+                f"upgrading risk to {context['latest_risk_level']}"
+            )
+
+        # 5분 캐시 저장
+        try:
+            await redis_client.set_json(cache_key, context, ttl=300)
+        except Exception as e:
+            logger.warning(f"Redis cache write failed: {e}")
+
+        logger.info(
+            f"MCDI context loaded for user {user_id}",
+            extra={
+                "risk_level": context["latest_risk_level"],
+                "mcdi_score": context["latest_mcdi_score"],
+                "trend": context["score_trend"]
+            }
+        )
+
+        return context
+
+    except Exception as e:
+        logger.warning(f"MCDI context fetch failed for {user_id}: {e}")
+        return {"latest_risk_level": "GREEN", "has_data": False}
+
+
+# ── 인지 도메인 질문 쿨다운 체크 (B3-4) ───────────────
+
+async def _check_probe_cooldown(user_id: str, domain: str) -> bool:
+    """
+    동일 도메인 2턴 내 재삽입 방지 (B3-4)
+
+    Args:
+        user_id: 사용자 ID
+        domain: MCDI 도메인 (LR, SD, NC, TO, ER, RT)
+
+    Returns:
+        True: 삽입 허용, False: 쿨다운 중
+
+    Example:
+        >>> if await _check_probe_cooldown("user_123", "TO"):
+        ...     # 시간 지남력 질문 삽입 가능
+        ...     pass
+    """
+    key = f"probe_used:{user_id}:{domain}"
+    try:
+        exists = await redis_client.get_json(key)
+        if exists:
+            logger.debug(f"Probe cooldown active for {user_id}:{domain}")
+            return False  # 쿨다운 중
+        # 사용 기록 저장 (TTL=30분 ≈ 2턴)
+        await redis_client.set_json(key, {"used": True}, ttl=1800)
+        return True  # 삽입 허용
+    except Exception as e:
+        logger.warning(f"Probe cooldown check failed: {e}")
+        return True  # 실패 시 허용 (보수적 기본값)
+
+
+# ── 반복 발화 감지 (B3-5) ───────────────────────────
+
+def _detect_repetition(user_message: str, recent_mentions: list) -> bool:
+    """
+    사용자 메시지가 최근 2턴 발화와 70% 이상 겹치는지 감지 (B3-5)
+
+    Args:
+        user_message: 현재 사용자 메시지
+        recent_mentions: 최근 사용자 발화 리스트
+
+    Returns:
+        True: 반복 감지됨, False: 정상
+
+    Example:
+        >>> if _detect_repetition("배고파", ["밥 먹을래", "배고파"]):
+        ...     # 반복 발화 처리
+        ...     pass
+    """
+    if not recent_mentions or len(recent_mentions) < 2:
+        return False
+
+    recent = recent_mentions[-2:]  # 최근 2개
+    words_new = set(user_message.split())
+    for prev in recent:
+        words_prev = set(prev.split())
+        if len(words_prev) == 0:
+            continue
+        overlap = len(words_new & words_prev) / len(words_prev)
+        if overlap >= 0.7:
+            logger.info(f"Repetition detected: {overlap:.1%} overlap")
+            return True
+    return False
+
+
+# ── 저녁 회상 퀴즈 사전 생성 ────────────────────────────
+
+async def _pre_generate_evening_quiz(user_id: str) -> None:
+    """저녁 시간대(18~24시) 회상 퀴즈를 Redis에 사전 생성 (Zero-Latency)
+
+    MCDI 분석 이후에 호출되어 최신 DB 데이터를 보장.
+    캐시된 퀴즈는 다음 메시지 처리 시 generate_response(next_question=quiz)로 전달.
+
+    Redis 키:
+    - evening_quiz_cache:{user_id}:{date} — 생성된 퀴즈 (24h TTL)
+    - evening_quiz_done:{user_id}:{date} — 1일 1회 보장 (24h TTL)
+    """
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import select, desc
+
+    today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+    cache_key = f"evening_quiz_cache:{user_id}:{today_str}"
+    done_key = f"evening_quiz_done:{user_id}:{today_str}"
+
+    try:
+        # 이미 완료 표시 확인
+        if await redis_client.exists(done_key):
+            return
+
+        # 최근 3일 대화 기록 조회
+        async with AsyncSessionLocal() as session:
+            three_days_ago = datetime.now(ZoneInfo("Asia/Seoul")) - __import__("datetime").timedelta(days=3)
+            result = await session.execute(
+                select(Conversation)
+                .where(
+                    Conversation.user_id == user_id,
+                    Conversation.created_at >= three_days_ago,
+                    Conversation.category.in_(["DAILY_EPISODIC", "REMINISCENCE", "VISUAL", "CHOICE", "NAMING"])
+                )
+                .order_by(desc(Conversation.created_at))
+                .limit(8)
+            )
+            recent_convos = result.scalars().all()
+
+        if not recent_convos:
+            logger.info(f"No recent conversations for evening quiz: {user_id}")
+            return
+
+        # 대화 내용을 기반으로 퀴즈 프롬프트 구성
+        convos_text = "\n".join([
+            f"- [{c.category}] 사용자: {c.message[:80]} / AI: {c.response[:80]}"
+            for c in recent_convos
+        ])
+
+        quiz_prompt = (
+            f"다음은 사용자와의 최근 대화 기록입니다:\n{convos_text}\n\n"
+            f"이 대화 내용 중에서 사용자가 기억했으면 하는 것을 하나 골라 짧은 회상 퀴즈를 만드세요.\n"
+            f"정답이 명확해야 하고, 사용자가 대답하기 쉬워야 합니다.\n"
+            f"형식: '오늘/최근에 ○○ 하셨는데, 기억나시나요?' 또는 '○○ 드셨는데, 맛있으셨어요?'\n"
+            f"반드시 1문장으로만 출력하세요. 추가 설명이나 물음표 이외의 기호 없이."
+        )
+
+        llm_service = LLMService()
+        quiz_text = await asyncio.wait_for(
+            llm_service.call(prompt=quiz_prompt, model="gpt-4o-mini"),
+            timeout=8.0
+        )
+
+        if quiz_text and quiz_text.strip():
+            # 퀴즈 캐시 저장 (24시간)
+            await redis_client.set(cache_key, quiz_text.strip(), ttl=86400)
+            # 완료 표시 (24시간)
+            await redis_client.set(done_key, "1", ttl=86400)
+            logger.info(
+                f"Evening quiz generated for {user_id}: {quiz_text.strip()[:50]}",
+                extra={"user_id": user_id, "quiz_preview": quiz_text.strip()[:50]}
+            )
+        else:
+            logger.warning(f"Empty quiz generated for {user_id}")
+
+    except asyncio.TimeoutError:
+        logger.warning(f"Evening quiz generation timeout for {user_id}")
+    except Exception as e:
+        logger.error(f"Evening quiz generation failed for {user_id}: {e}", exc_info=True)
 
 
 # ── 카카오 응답 형식 ──────────────────────────────────
@@ -569,6 +867,21 @@ async def kakao_webhook(
         conv_mode = "normal"  # 보완 2: 대화 모드 (SD 편향 플래그용, 기본값)
         selected_category = None  # HIGH-2: 6개 카테고리 라우팅
 
+        # ========== 저녁 회상 퀴즈 캐시 확인 ==========
+        evening_quiz = None
+        now_kst_check = datetime.now(ZoneInfo("Asia/Seoul"))
+        if 18 <= now_kst_check.hour < 24:
+            today_str_check = now_kst_check.strftime("%Y-%m-%d")
+            quiz_cache_key = f"evening_quiz_cache:{user_id}:{today_str_check}"
+            cached_quiz = await redis_client.get(quiz_cache_key)
+            if cached_quiz:
+                evening_quiz = cached_quiz
+                logger.info(
+                    f"Evening quiz delivered for {user_id}: {evening_quiz[:50]}",
+                    extra={"user_id": user_id}
+                )
+        # ==============================================
+
         if message_type == "image":
             # 이미지는 즉시 응답 후 백그라운드에서 분석
             # 카카오 5초 타임아웃 내에 응답 불가 → 분석은 비동기 처리
@@ -583,6 +896,17 @@ async def kakao_webhook(
             )
         else:
             user_message_for_save = utterance
+
+            # ========== 턴 중복 방지 (카카오 웹훅 재시도 대응) ==========
+            msg_hash = hashlib.md5(user_message_for_save.encode()).hexdigest()
+            dedup_key = f"msg_dedup:{user_id}:{msg_hash}"
+            if await redis_client.exists(dedup_key):
+                logger.info(
+                    f"Duplicate message detected for {user_id}, skipping",
+                    extra={"user_id": user_id, "msg_preview": user_message_for_save[:30]}
+                )
+                return _build_kakao_response("")  # 빈 응답으로 중복 방지
+            # ============================================================
 
             # HIGH-2: 카테고리 선택 (약한 지표 우선, 주간 빈도 제한 적용)
             try:
@@ -603,14 +927,55 @@ async def kakao_webhook(
                 logger.warning(f"카테고리 선택 실패 (기본값 사용): {cat_err}")
                 selected_category = "DAILY_EPISODIC"
 
+            # B3-3: MCDI 컨텍스트 조회 후 응답 생성 (어댑티브 블록 활성화)
+            mcdi_context = await _get_mcdi_context(user_id)
+
+            # ========== B3-5: 반복 발화 감지 후 risk_level 승격 (신규) ==========
+            # 세션에서 최근 발화 가져오기
+            session_data_tmp = await redis_client.get_json(f"session:{user_id}")
+            recent_mentions_raw = session_data_tmp.get("conversation_history", []) if session_data_tmp else []
+            # conversation_history의 키는 "user" (dialogue_manager.py:271 확인)
+            # add_turn()은 응답 생성 후에 호출되므로, 여기서는 현재 턴이 아직 포함되지 않음 (정상 동작)
+            recent_mentions = [turn.get("user", "") for turn in recent_mentions_raw if turn.get("user")]
+
+            # 반복 감지 시 risk_level을 임시 ORANGE로 승격
+            if _detect_repetition(user_message_for_save, recent_mentions):
+                if mcdi_context and mcdi_context.get("has_data"):
+                    original_risk = mcdi_context.get("latest_risk_level", "GREEN")
+                    mcdi_context["latest_risk_level"] = "ORANGE"
+                    logger.info(
+                        f"Repetition detected, upgrading risk: {original_risk} → ORANGE",
+                        extra={"user_id": user_id}
+                    )
+            # ============================================================
+
             ai_response = await dialogue_manager.generate_response(
                 user_id=user_id,
-                user_message=user_message_for_save
+                user_message=user_message_for_save,
+                mcdi_context=mcdi_context,  # 어댑티브 대화 블록 생성용
+                next_question=evening_quiz  # 저녁 회상 퀴즈 (캐시된 경우)
             )
             conv_mode = await dialogue_manager.get_last_conversation_mode(user_id)
 
+            # ========== B4-1: Gap 메시지 접두사 추가 (2시간 이상 경과 시) ==========
+            hours_since_last = await dialogue_manager.get_hours_since_last_interaction(user_id)
+            if hours_since_last and hours_since_last >= 2.0:
+                time_aware = TimeAwareDialogue()
+                gap_message = time_aware.generate_combined_message(hours_since_last)
+                # Gap 메시지를 AI 응답 앞에 추가
+                ai_response = f"{gap_message}\n\n{ai_response}"
+                logger.info(
+                    f"Gap message prepended for {user_id}",
+                    extra={"user_id": user_id, "hours_since_last": hours_since_last}
+                )
+            # ====================================================================
+
         # ── 4. 대화 저장 ──────────────────────────────
         elapsed_ms = int((time.time() - start_time) * 1000)
+
+        # 턴 중복 방지: 처리 완료된 메시지 60초간 마킹
+        if message_type == "text":
+            await redis_client.set(dedup_key, "1", ttl=60)
 
         await dialogue_manager.add_turn(
             user_id=user_id,
@@ -644,6 +1009,21 @@ async def kakao_webhook(
             conversation_mode=conv_mode
         )
 
+        # ========== 저녁 회상 퀴즈 트리거 (18~24시, 1일 1회) ==========
+        now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+        if 18 <= now_kst.hour < 24:
+            quiz_done_key = f"evening_quiz_done:{user_id}:{now_kst.strftime('%Y-%m-%d')}"
+            if not await redis_client.exists(quiz_done_key):
+                background_tasks.add_task(
+                    _pre_generate_evening_quiz,
+                    user_id=user_id
+                )
+                logger.info(
+                    f"Evening quiz pre-generation scheduled for {user_id}",
+                    extra={"user_id": user_id, "hour": now_kst.hour}
+                )
+        # ============================================================
+
         logger.info(
             "응답 완료 + MCDI 분석 예약됨",
             extra={"user_id": user_id, "elapsed_ms": elapsed_ms}
@@ -655,7 +1035,7 @@ async def kakao_webhook(
     except Exception as e:
         logger.error(f"웹훅 처리 실패: {e}", exc_info=True)
         return _build_kakao_response(
-            "잠시 정원을 가꾸는데 문제가 생겼어요 🌱\n조금 후에 다시 말씀해 주세요!"
+            "잠시 정원을 가꾸는데 문제가 생겼어요 ㅎㅎ\n조금 후에 다시 말씀해 주세요!"
         )
 
 

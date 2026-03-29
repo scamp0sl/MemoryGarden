@@ -105,7 +105,11 @@ class ResponseGenerator:
         user_message: str,
         conversation_history: List[Dict[str, str]],
         user_context: Optional[Dict[str, Any]] = None,
-        next_question: Optional[str] = None
+        next_question: Optional[str] = None,
+        user_id: Optional[str] = None,  # B3-4: 쿨다운 체크용 추가
+        mcdi_context: Optional[Dict[str, Any]] = None,  # B3-3: 신규 추가
+        relationship_stage: Optional[int] = None,  # B1-3: 신규 추가
+        emotion_vector: Optional[Dict[str, float]] = None  # B2-6: 신규 추가
     ) -> str:
         """
         AI 응답 생성
@@ -125,6 +129,15 @@ class ResponseGenerator:
                     "garden_name": "행복한 정원"
                 }
             next_question: 다음 질문 (포함 시 응답 끝에 추가)
+            mcdi_context: MCDI 분석 컨텍스트 (B3-3 어댑티브 대화용)
+                {
+                    "latest_risk_level": "GREEN",
+                    "latest_mcdi_score": 78.5,
+                    "score_trend": "stable",
+                    "latest_scores": {"LR": 80.0, ...},
+                    "has_data": True
+                }
+            relationship_stage: 관계 Stage 0~4 (B1-3 관계 모델용)
 
         Returns:
             생성된 응답 메시지
@@ -146,12 +159,20 @@ class ResponseGenerator:
                 "Generating response",
                 extra={
                     "user_message_length": len(user_message),
-                    "history_length": len(conversation_history)
+                    "history_length": len(conversation_history),
+                    "has_mcdi_context": mcdi_context is not None,
+                    "relationship_stage": relationship_stage
                 }
             )
 
-            # 시스템 프롬프트 구성
-            system_prompt = self._build_system_prompt(user_context or {})
+            # 시스템 프롬프트 구성 (B3-3: mcdi_context, B1-3: relationship_stage, B2-6: emotion_vector 추가)
+            system_prompt = await self._build_system_prompt(
+                user_id=user_id,  # B3-4: 쿨다운용 user_id 전달
+                user_context=user_context or {},
+                mcdi_context=mcdi_context,
+                relationship_stage=relationship_stage,
+                emotion_vector=emotion_vector
+            )
 
             # 메시지 리스트 구성
             messages = self._build_messages(
@@ -198,7 +219,11 @@ class ResponseGenerator:
         detected_emotion: str,
         emotion_intensity: float,
         conversation_history: List[Dict[str, str]],
-        user_context: Optional[Dict[str, Any]] = None
+        user_context: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,  # B3-4: 쿨다운 체크용 추가
+        mcdi_context: Optional[Dict[str, Any]] = None,  # B3-3: 신규 추가
+        relationship_stage: Optional[int] = None,  # B1-3: 신규 추가
+        emotion_vector: Optional[Dict[str, float]] = None  # B2-6: 신규 추가
     ) -> str:
         """
         공감적 응답 생성
@@ -211,6 +236,9 @@ class ResponseGenerator:
             emotion_intensity: 감정 강도 (0.0~1.0)
             conversation_history: 대화 히스토리
             user_context: 사용자 컨텍스트
+            mcdi_context: MCDI 분석 컨텍스트 (B3-3 어댑티브 대화용)
+            relationship_stage: 관계 Stage 0~4 (B1-3 관계 모델용)
+            emotion_vector: 감정 벡터 (B2-6 감정 상태 추적용)
 
         Returns:
             공감적 응답 메시지
@@ -230,11 +258,15 @@ class ResponseGenerator:
         enriched_context["recent_emotion"] = self._translate_emotion(detected_emotion)
         enriched_context["emotion_intensity"] = emotion_intensity
 
-        # 시스템 프롬프트에 감정 대응 가이드 추가
-        system_prompt = self._build_system_prompt_with_emotion(
-            enriched_context,
-            detected_emotion,
-            emotion_intensity
+        # 시스템 프롬프트에 감정 대응 가이드 추가 (B3-3: mcdi_context, B1-3: relationship_stage, B2-6: emotion_vector 추가)
+        system_prompt = await self._build_system_prompt_with_emotion(
+            user_id=user_id,  # B3-4: 쿨다운용 user_id 전달
+            user_context=enriched_context,
+            emotion=detected_emotion,
+            intensity=emotion_intensity,
+            mcdi_context=mcdi_context,
+            relationship_stage=relationship_stage,
+            emotion_vector=emotion_vector  # B2-6
         )
 
         # 메시지 구성
@@ -259,7 +291,8 @@ class ResponseGenerator:
                 extra={
                     "emotion": detected_emotion,
                     "intensity": emotion_intensity,
-                    "response_length": len(generated_text)
+                    "response_length": len(generated_text),
+                    "has_mcdi_context": mcdi_context is not None
                 }
             )
 
@@ -273,23 +306,41 @@ class ResponseGenerator:
     # Private Helper Methods
     # ============================================
 
-    def _build_system_prompt(self, user_context: Dict[str, Any]) -> str:
-        """시스템 프롬프트 구성"""
-        return self.prompt_builder.build_system_prompt(
-            user_name=user_context.get("user_name"),
-            recent_emotion=user_context.get("recent_emotion"),
-            biographical_facts=user_context.get("biographical_facts"),
-            garden_name=user_context.get("garden_name")
+    async def _build_system_prompt(
+        self,
+        user_id: Optional[str] = None,  # B3-4: 쿨다운 체크용 추가
+        user_context: Dict[str, Any] = None,
+        mcdi_context: Optional[Dict[str, Any]] = None,  # B3-3: 신규 추가
+        relationship_stage: Optional[int] = None,  # B1-3: 신규 추가
+        emotion_vector: Optional[Dict[str, float]] = None  # B2-6: 신규 추가
+    ) -> str:
+        """시스템 프롬프트 구성 (B3-3: mcdi_context, B1-3: relationship_stage, B2-6: emotion_vector 지원)"""
+        return await self.prompt_builder.build_system_prompt(
+            user_id=user_id,  # B3-4: 쿨다운용 user_id 전달
+            user_name=user_context.get("user_name") if user_context else None,
+            recent_emotion=user_context.get("recent_emotion") if user_context else None,
+            biographical_facts=user_context.get("biographical_facts") if user_context else None,
+            garden_name=user_context.get("garden_name") if user_context else None,
+            mcdi_context=mcdi_context,  # B3-3: MCDI 어댑티브 블록
+            relationship_stage=relationship_stage,  # B1-3: 관계 Stage 블록
+            emotion_vector=emotion_vector,  # B2-6: 감정 벡터 설명
+            episodic_memories=user_context.get("episodic_memories") if user_context else None,  # 에피소드 기억
+            recent_mentions=user_context.get("recent_mentions") if user_context else None,  # 대화 맥락 연속성
+            suppress_questions=user_context.get("suppress_questions", False) if user_context else False  # 피로도 방지
         )
 
-    def _build_system_prompt_with_emotion(
+    async def _build_system_prompt_with_emotion(
         self,
-        user_context: Dict[str, Any],
-        emotion: str,
-        intensity: float
+        user_id: Optional[str] = None,  # B3-4: 쿨다운 체크용 추가
+        user_context: Dict[str, Any] = None,
+        emotion: str = None,
+        intensity: float = None,
+        mcdi_context: Optional[Dict[str, Any]] = None,  # B3-3: 신규 추가
+        relationship_stage: Optional[int] = None,  # B1-3: 신규 추가
+        emotion_vector: Optional[Dict[str, float]] = None  # B2-6: 신규 추가
     ) -> str:
-        """감정 대응 가이드가 포함된 시스템 프롬프트 구성"""
-        base_prompt = self._build_system_prompt(user_context)
+        """감정 대응 가이드가 포함된 시스템 프롬프트 구성 (B3-3: mcdi_context, B1-3: relationship_stage, B2-6: emotion_vector 지원)"""
+        base_prompt = await self._build_system_prompt(user_id, user_context, mcdi_context=mcdi_context, relationship_stage=relationship_stage, emotion_vector=emotion_vector)
 
         # 감정별 대응 가이드
         emotion_guides = {

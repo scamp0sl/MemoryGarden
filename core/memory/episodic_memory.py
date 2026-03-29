@@ -16,12 +16,22 @@ class EpisodicMemory:
         self.client = vector_db_client.get_client()
 
     async def save_episode(self, text: str, metadata: Dict):
-        """대화 내용(Episode)을 벡터로 변환해 저장"""
+        """대화 내용(Episode)을 벡터로 변환해 저장
+
+        C1-1: 서사 강화 필드 추가
+        - samantha_emotion: 사만다의 당시 감정
+        - follow_up_notes: 후속 화제
+        - relationship_impact: 관계 영향력 (-1.0~+1.0)
+        """
+        # C1-1: 서사 강화 필드 추가 (metadata에서 추출 또는 기본값)
+        samantha_emotion = metadata.pop("samantha_emotion", None)
+        follow_up_notes = metadata.pop("follow_up_notes", None)
+        relationship_impact = metadata.pop("relationship_impact", 0.0)
+
         # 1. 텍스트 -> 벡터 변환
         vector = await embedding_service.get_embedding(text)
-        
-        # 2. Qdrant에 저장
-        # (주의: 실제로는 collection 존재 여부 확인 및 생성 로직이 필요할 수 있음)
+
+        # 2. Qdrant에 저장 (C1-1: 새 필드 포함)
         await self.client.upsert(
             collection_name=self.collection_name,
             points=[
@@ -31,7 +41,10 @@ class EpisodicMemory:
                     payload={
                         "user_id": self.user_id,
                         "text": text,
-                        **metadata
+                        "samantha_emotion": samantha_emotion,  # C1-1 신규
+                        "follow_up_notes": follow_up_notes,      # C1-1 신규
+                        "relationship_impact": relationship_impact, # C1-1 신규
+                        **metadata  # 기존 메타데이터
                     }
                 )
             ]

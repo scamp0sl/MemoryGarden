@@ -135,6 +135,9 @@ class DialogueScheduler:
             self.is_running = True
             logger.info("✅ Scheduler started successfully")
 
+            # C5: Proactive Messaging 스케줄 등록
+            await self._register_proactive_messaging_job()
+
             # 현재 등록된 작업 수 로깅
             jobs = self.scheduler.get_jobs()
             logger.info(f"📋 Currently scheduled jobs: {len(jobs)}")
@@ -142,6 +145,44 @@ class DialogueScheduler:
         except Exception as e:
             logger.error(f"Failed to start scheduler: {e}", exc_info=True)
             raise SchedulerError(f"Scheduler start failed: {e}") from e
+
+    async def _register_proactive_messaging_job(self) -> None:
+        """C5: Proactive Messaging 스케줄 등록
+
+        매일 10시, 15시, 20시에 비활성 사용자에게 메시지 발송
+        """
+        try:
+            from tasks.dialogue import send_proactive_messages
+
+            trigger_times = ["10:00", "15:00", "20:00"]
+
+            for time_str in trigger_times:
+                hour, minute = map(int, time_str.split(':'))
+
+                trigger = CronTrigger(
+                    hour=hour,
+                    minute=minute,
+                    timezone=TIMEZONE
+                )
+
+                job_id = f"proactive_messaging_{time_str.replace(':', '')}"
+
+                # 기존 작업 확인 후 추가
+                existing_job = self.scheduler.get_job(job_id)
+                if existing_job is None:
+                    self.scheduler.add_job(
+                        func=send_proactive_messages,
+                        trigger=trigger,
+                        id=job_id,
+                        name=f"Proactive messaging at {time_str}",
+                        replace_existing=True
+                    )
+                    logger.info(f"✅ Registered proactive messaging job at {time_str}")
+                else:
+                    logger.debug(f"Proactive messaging job already exists at {time_str}")
+
+        except Exception as e:
+            logger.error(f"Failed to register proactive messaging job: {e}", exc_info=True)
 
     async def stop(self) -> None:
         """

@@ -168,7 +168,7 @@ class RedisClient:
                     settings.REDIS_URL,
                     encoding="utf-8",
                     decode_responses=True,
-                    max_connections=20,  # 최대 연결 수
+                    max_connections=50,  # 최대 연결 수 (20→50, 동시 요청 대응)
                     socket_timeout=5.0,  # 소켓 타임아웃 (초)
                     socket_connect_timeout=5.0,  # 연결 타임아웃 (초)
                     retry_on_timeout=True,  # 타임아웃 시 재시도

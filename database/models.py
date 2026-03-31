@@ -58,6 +58,9 @@ class User(Base):
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     deleted_at = Column(DateTime, nullable=True)
 
+    # 활성 상태 (2026-03-30 추가, push_scheduler용)
+    is_active = Column(Boolean, default=True, nullable=False)
+
     # Relationships
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
     analysis_results = relationship("AnalysisResult", back_populates="user", cascade="all, delete-orphan")

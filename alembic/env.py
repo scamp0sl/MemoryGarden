@@ -32,7 +32,7 @@ sys.path.insert(0, str(project_root))
 # 4. Local Imports
 # ============================================
 from config.settings import settings
-from models import Base  # 모든 모델이 포함된 Base
+from database.models import Base  # 모든 모델이 포함된 Base
 
 # ============================================
 # 5. Alembic Config

@@ -200,7 +200,7 @@ class MemoryExtractor:
             response = await self.llm_service.call_json(
                 prompt=prompt,
                 system_prompt="당신은 대화에서 중요한 사실과 기억을 추출하는 전문가입니다.",
-                temperature=0.3,
+                temperature=0.6,  # Action01: 유연성 확보 (0.3 → 0.6)
                 max_tokens=1000
             )
 
@@ -347,18 +347,52 @@ class MemoryExtractor:
         current_emotion: Optional[str],
         current_datetime: datetime
     ) -> MemoryExtractionResult:
-        """LLM 응답 파싱"""
+        """LLM 응답 파싱 (Action01: 제외 키워드 필터링 추가)"""
         try:
-            # Biographical facts 파싱
+            # Action01: 제외 키워드 리스트 (꽃/식물/동물/자연/계절)
+            EXCLUDED_VALUE_KEYWORDS = {
+                # 꽃/식물
+                "진달래", "개나리", "무궁화", "장미", "해바라기", "벚꽃",
+                "코스모스", "국화", "튤립", "수국", "라일락",
+                "쑥", "냉이", "민들레", "소나무", "잔디", "호박", "고추",
+                # 동물
+                "강아지", "고양이", "병아리", "토끼", "다람쥐", "참새",
+                # 자연
+                "바람", "구름", "비", "눈", "달", "별", "해",
+                # 계절
+                "봄", "여름", "가을", "겨울"
+            }
+
+            # Biographical facts 파싱 (Action01: 검증 로직 추가)
             biographical_facts = []
             for fact in response.get("biographical_facts", []):
+                entity = fact.get("entity", "")
+                value = fact.get("value", "")
+                confidence = float(fact.get("confidence", 0.8))
+
+                # Action01: 제외 키워드 체크
+                if any(keyword in value for keyword in EXCLUDED_VALUE_KEYWORDS):
+                    logger.warning(
+                        f"[Action01] Excluded biographical fact: entity={entity}, "
+                        f"value={value} (matched excluded keywords)"
+                    )
+                    continue
+
+                # Action01: confidence 0.7 미만 제외
+                if confidence < 0.7:
+                    logger.warning(
+                        f"[Action01] Low confidence biographical fact skipped: "
+                        f"entity={entity}, confidence={confidence}"
+                    )
+                    continue
+
                 biographical_facts.append(
                     ExtractedFact(
-                        entity=fact["entity"],
-                        value=fact["value"],
-                        category=self._map_to_entity_category(fact.get("entity")),
+                        entity=entity,
+                        value=value,
+                        category=self._map_to_entity_category(entity),
                         fact_type=self._normalize_fact_type(fact.get("fact_type", "preference")),
-                        confidence=float(fact.get("confidence", 0.8)),
+                        confidence=confidence,
                         context=fact.get("context", ""),
                         timestamp=current_datetime.isoformat()
                     )

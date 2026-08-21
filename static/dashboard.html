@@ -840,9 +840,9 @@
         const dot = u.is_inactive
           ? '<span class="inactive-dot" title="24시간+ 미응답"></span>'
           : '<span class="active-dot" title="오늘 활동"></span>';
-        const shortKey = u.kakao_channel_user_key
-          ? u.kakao_channel_user_key.slice(0, 8) + '…'
-          : u.user_id.slice(0, 8) + '…';
+        // biographical_name 우선, 없으면 채널키, 없으면 user_id
+        const displayName = u.biographical_name || u.kakao_channel_user_key || u.user_id;
+        const shortKey = displayName.slice(0, 10) + (displayName.length > 10 ? '…' : '');
         const lastTime = u.last_interaction
           ? new Date(u.last_interaction).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
           : '—';
@@ -863,7 +863,7 @@
         <td style="min-width:130px">
           ${dot}<span class="user-name">${escHtml(u.name)}</span>
           ${gardenLabel}<br>
-          <span class="user-key" title="${u.kakao_channel_user_key || u.user_id}">🔑 ${shortKey}</span>
+          <span class="user-key" title="biographical: ${u.biographical_name || '없음'} | channel: ${u.kakao_channel_user_key || '없음'}">👤 ${shortKey}</span>
         </td>
         <td style="white-space:nowrap;font-size:11px">Day ${u.onboarding_day}</td>
         <td style="font-weight:700;font-size:14px;white-space:nowrap">${mcdi}</td>
@@ -883,7 +883,7 @@
       return `
     <table>
       <thead><tr>
-        <th class="${sortClass('name')}"    data-key="name"     onclick="sortTable('name')">이름 / 채널키</th>
+        <th class="${sortClass('name')}"    data-key="name"     onclick="sortTable('name')">이름 / bio.name</th>
         <th class="${sortClass('onboarding')}" data-key="onboarding" onclick="sortTable('onboarding')">온보딩</th>
         <th class="${sortClass('mcdi')}"    data-key="mcdi"     onclick="sortTable('mcdi')">MCDI</th>
         <th class="${sortClass('risk')}"    data-key="risk"     onclick="sortTable('risk')">위험도</th>

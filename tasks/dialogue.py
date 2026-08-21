@@ -1035,7 +1035,13 @@ async def _send_via_oauth(user, message: str) -> Dict[str, Any]:
             message=message
         )
 
-        logger.info(f"✅ [send_to_me] Message sent to {user.kakao_id}")
+        # 카카오 API 실제 응답 확인 (result_code 0 = 성공)
+        result_code = kakao_result.get("result_code", "unknown")
+        logger.info(f"✅ [send_to_me] Message sent to {user.kakao_id}, kakao_result: {kakao_result}")
+
+        if result_code != 0:
+            logger.warning(f"⚠️ [send_to_me] Non-zero result_code for {user.kakao_id}: {result_code}, msg: {kakao_result.get('msg')}")
+
         return {
             "success": True,
             "method": "send_to_me",

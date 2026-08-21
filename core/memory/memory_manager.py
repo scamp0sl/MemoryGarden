@@ -44,6 +44,14 @@ from core.memory.memory_extractor import (
     ExtractedFact,
     MemoryType,
 )
+from core.memory.intent_scorer import (
+    calculate_intent_score,
+    detect_rejection,
+    detect_confirmation,
+    evaluate_storage,
+    is_protected_entity,
+    PROTECTED_ENTITIES,
+)
 from utils.logger import get_logger
 from utils.exceptions import WorkflowError
 
@@ -149,6 +157,13 @@ class MemoryManager:
 
         analysis = analysis or {}
 
+        # Stage 3: 추출 전에 이전 tentative fact 처리
+        # 사용자의 현재 발화가 이전 tentative fact를 거부/확정하는지 검사
+        try:
+            await self._process_tentative_facts(user_id, message)
+        except Exception as e:
+            logger.warning(f"Tentative fact processing failed (continuing): {e}")
+
         # 기억 추출
         extraction_result = await self.memory_extractor.extract_from_message(
             user_message=message,
@@ -182,10 +197,11 @@ class MemoryManager:
                 analysis["samantha_emotion"] = "중립"
 
         # 4계층 병렬 저장 (C1-2: analysis 전달 for emotion intensity filter)
+        # Stage 2/3: biographical에 사용자 message 전달 (의도 점수 계산용)
         results = await asyncio.gather(
             self._store_session_memory(user_id, message, response),
             self._store_episodic_memories(user_id, extraction_result, analysis),
-            self._store_biographical_facts(user_id, extraction_result),
+            self._store_biographical_facts(user_id, extraction_result, message),
             self._store_analytical_data(user_id, analysis),
             return_exceptions=True
         )
@@ -676,10 +692,14 @@ class MemoryManager:
     async def _store_biographical_facts(
         self,
         user_id: str,
-        extraction_result: MemoryExtractionResult
+        extraction_result: MemoryExtractionResult,
+        user_message: Optional[str] = None
     ) -> int:
         """
-        Biographical Memory 저장
+        Biographical Memory 저장 (Stage 2/3 적용)
+
+        보호 entity(name/nickname/...)는 사용자 발화의 의도 점수에 따라
+        차등 임계점을 적용하고, score 0.3~0.5는 tentative로 저장.
 
         Qdrant: 의미 검색용 벡터 저장 (entity+value 임베딩)
         Redis: 빠른 키-값 조회용 캐시 (entity 기준)
@@ -695,15 +715,58 @@ class MemoryManager:
             client = qdrant_manager.client
 
             for fact in extraction_result.biographical_facts:
+                # ─── Stage 2/3: 보호 entity 의도 점수 검증 ───
+                fact_status = "confirmed"  # 기본값 (비보호 entity)
+                final_confidence = fact.confidence
+
+                if is_protected_entity(fact.entity) and user_message:
+                    # 의도 점수 계산
+                    intent_score, signals = calculate_intent_score(
+                        message=user_message,
+                        entity=fact.entity,
+                        value=fact.value,
+                    )
+
+                    # 기존 fact 조회
+                    cache_key = f"biographical:{user_id}:{fact.entity}"
+                    existing = await redis_client.get_json(cache_key)
+
+                    # 저장 결정
+                    should_store, status, reason = evaluate_storage(
+                        intent_score=intent_score,
+                        existing_fact=existing,
+                        new_value=fact.value,
+                    )
+
+                    if not should_store:
+                        logger.warning(
+                            f"[IntentScore] Biographical fact rejected: "
+                            f"entity={fact.entity}, value='{fact.value}', "
+                            f"score={intent_score}, signals={signals}, reason={reason}"
+                        )
+                        continue
+
+                    fact_status = status
+                    # tentative는 신뢰도 낮춤
+                    if status == "tentative":
+                        final_confidence = min(fact.confidence, 0.7)
+
+                    logger.info(
+                        f"[IntentScore] Storing biographical fact: "
+                        f"entity={fact.entity}, value='{fact.value}', "
+                        f"score={intent_score}, status={status}, signals={signals}"
+                    )
+
                 fact_data = {
                     "user_id": user_id,
                     "entity": fact.entity,
                     "value": fact.value,
                     "category": fact.category.value,
                     "fact_type": fact.fact_type.value,
-                    "confidence": fact.confidence,
+                    "confidence": final_confidence,
                     "context": fact.context,
                     "timestamp": fact.timestamp,
+                    "status": fact_status,  # Stage 3: confirmed/tentative
                 }
 
                 # Redis에 항상 저장 (빠른 조회)
@@ -741,6 +804,58 @@ class MemoryManager:
         except Exception as e:
             logger.error(f"Failed to store biographical facts: {e}")
             raise
+
+    async def _process_tentative_facts(
+        self,
+        user_id: str,
+        user_message: str
+    ) -> None:
+        """
+        Stage 3: 이전 턴에 tentative로 저장된 보호 entity의 거부/확정 처리.
+
+        사용자의 현재 발화가 이전 tentative fact를 거부하면 삭제,
+        강하게 확정하면 confirmed로 승격.
+
+        Args:
+            user_id: 사용자 ID
+            user_message: 사용자의 현재 메시지
+        """
+        if not user_message:
+            return
+
+        # 보호 entity별로 tentative 상태 fact 조회
+        for entity in PROTECTED_ENTITIES:
+            cache_key = f"biographical:{user_id}:{entity}"
+            existing = await redis_client.get_json(cache_key)
+
+            if not existing or existing.get("status") != "tentative":
+                continue
+
+            tentative_value = existing.get("value", "")
+
+            # 거부 감지
+            if detect_rejection(user_message, tentative_value):
+                logger.info(
+                    f"[Stage3] Tentative fact rejected by user: "
+                    f"entity={entity}, value='{tentative_value}'"
+                )
+                # 거부된 tentative는 삭제 (Redis만; Qdrant 이력은 보존)
+                await redis_client.delete(cache_key)
+                continue
+
+            # 확정 강조 감지
+            if detect_confirmation(user_message):
+                logger.info(
+                    f"[Stage3] Tentative fact confirmed by user: "
+                    f"entity={entity}, value='{tentative_value}'"
+                )
+                existing["status"] = "confirmed"
+                existing["confidence"] = max(existing.get("confidence", 0.7), 0.95)
+                await redis_client.set_json(
+                    cache_key,
+                    existing,
+                    ttl=86400 * 365,
+                )
 
     async def _retrieve_biographical_facts(
         self,

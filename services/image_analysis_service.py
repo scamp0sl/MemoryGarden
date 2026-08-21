@@ -39,8 +39,8 @@ logger = get_logger(__name__)
 # 5. 상수 정의
 # ============================================
 
-# OpenAI Vision 모델
-VISION_MODEL = "gpt-4o"  # GPT-4o with vision
+# OpenAI Vision 모델 (.env VISION_MODEL 우선, 없으면 GPT_MODEL, 둘 다 없으면 gpt-4o)
+VISION_MODEL: str = settings.VISION_MODEL or settings.GPT_MODEL or "gpt-4o"
 MAX_TOKENS = 500  # 분석 응답 최대 토큰
 TEMPERATURE = 0.3  # 일관성을 위한 낮은 temperature
 
@@ -156,7 +156,7 @@ class ImageAnalysisService:
                 "raw_response": "원본 응답",
                 "analysis_type": "meal",
                 "timestamp": "2026-02-11T16:00:00Z",
-                "model": "gpt-4o"
+                "model": "gpt-4o"  (VISION_MODEL 값)
             }
 
         Raises:
@@ -315,7 +315,7 @@ class ImageAnalysisService:
         try:
             # 간단한 텍스트 completion으로 테스트
             response = await self.client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=settings.GPT_MODEL,
                 messages=[{"role": "user", "content": "Hello"}],
                 max_tokens=5
             )

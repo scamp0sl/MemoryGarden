@@ -24,7 +24,7 @@ from database.redis_client import redis_client
 from core.dialogue.dialogue_manager import DialogueManager
 from core.dialogue.time_aware import TimeAwareDialogue  # B4-1: Gap 메시지 생성
 from core.analysis.analyzer import Analyzer
-from services.llm_service import LLMService
+from services.llm_service import get_llm_service
 from services.image_analysis_service import get_image_analysis_service
 from core.nlp.embedder import Embedder
 from config.settings import settings
@@ -37,6 +37,7 @@ router = APIRouter(prefix="/kakao", tags=["kakao"])
 # ── 싱글톤 인스턴스 ────────────────────────────────────
 _dialogue_manager: DialogueManager = None
 _analyzer: Analyzer = None
+_category_selector = None
 
 
 def get_dialogue_manager() -> DialogueManager:
@@ -49,10 +50,18 @@ def get_dialogue_manager() -> DialogueManager:
 def get_analyzer() -> Analyzer:
     global _analyzer
     if _analyzer is None:
-        llm = LLMService()
+        llm = get_llm_service()
         embedder = Embedder()
         _analyzer = Analyzer(llm, embedder)
     return _analyzer
+
+
+def get_category_selector():
+    global _category_selector
+    if _category_selector is None:
+        from core.dialogue.category_selector import CategorySelector
+        _category_selector = CategorySelector()
+    return _category_selector
 
 
 # ── 사용자 조회/생성 ──────────────────────────────────
@@ -83,24 +92,42 @@ async def _get_or_create_user(
                 oauth_user = result.scalar_one_or_none()
 
                 if oauth_user and not oauth_user.kakao_channel_user_key:
-                    # 동일 channel_user_key를 가진 기존 채널 전용 계정이 있으면 먼저 해제
+                    # 동일 channel_user_key를 가진 기존 계정이 있으면 병합
                     dup_result = await db.execute(
                         select(User).where(User.kakao_channel_user_key == plus_friend_user_key)
                     )
                     dup_user = dup_result.scalar_one_or_none()
                     if dup_user and dup_user.id != oauth_user.id:
-                        # OAuth 계정(access_token 보유)은 덮어쓰지 않음 - 채널 전용 ch_ 계정만 해제
-                        if dup_user.kakao_access_token:
-                            logger.warning(
-                                f"채널 key 충돌: {dup_user.kakao_id}는 OAuth 계정이므로 해제 생략 "
-                                f"(이미 다른 OAuth 계정이 연동됨)"
-                            )
-                            continue
-                        dup_user.kakao_channel_user_key = None
-                        await db.flush()
-                        logger.info(f"기존 채널 전용 계정에서 key 해제: {dup_user.kakao_id}")
+                        # 기존 계정이 있으면 병합: OAuth 토큰만 업데이트, 기존 데이터 보존
+                        logger.info(
+                            f"채널 key 충돌 감지: 기존 계정({dup_user.kakao_id})에 "
+                            f"새 OAuth 토큰 병합 (kakao_id: {oauth_user.kakao_id} -> {dup_user.kakao_id})"
+                        )
 
-                    # 연동 실행
+                        # 기존 계정에 새 OAuth 토큰 정보 복사
+                        dup_user.kakao_access_token = oauth_user.kakao_access_token
+                        dup_user.kakao_refresh_token = oauth_user.kakao_refresh_token
+                        dup_user.kakao_token_expires_at = oauth_user.kakao_token_expires_at
+                        dup_user.kakao_refresh_token_expires_at = oauth_user.kakao_refresh_token_expires_at
+
+                        # kakao_id 업데이트 (최신 OAuth ID로)
+                        dup_user.kakao_id = oauth_user.kakao_id
+
+                        await db.flush()
+
+                        # 중복된 새 OAuth 계정 삭제
+                        await db.delete(oauth_user)
+                        await db.commit()
+                        await db.refresh(dup_user)
+
+                        logger.info(f"계정 병합 완료: {dup_user.kakao_id}, 기존 계정 보존")
+
+                        # pending 키 삭제
+                        await redis_client.delete(pending_key)
+
+                        return dup_user, False, True  # just_linked=True
+
+                    # 연동 실행 (기존 계정 없는 경우)
                     oauth_user.kakao_channel_user_key = plus_friend_user_key
                     await db.commit()
                     await db.refresh(oauth_user)
@@ -637,6 +664,101 @@ async def _get_mcdi_context(user_id: str) -> dict:
         return {"latest_risk_level": "GREEN", "has_data": False}
 
 
+async def _get_mcdi_context_fast(user_id: str) -> dict:
+    """
+    Redis 캐시에서만 MCDI 컨텍스트 조회 (DB 조회 없음, 차단 방지)
+
+    캐시 miss 시 기본값 반환 + 백그라운드 리프레시 트리거.
+    웹훅 메인 경로에서 호출하여 차단 없이 빠르게 응답.
+
+    Args:
+        user_id: 사용자 ID
+
+    Returns:
+        MCDI 컨텍스트 딕셔너리
+    """
+    cache_key = f"mcdi_context:{user_id}"
+
+    try:
+        cached = await redis_client.get_json(cache_key)
+        if cached:
+            logger.debug(f"MCDI cache hit for {user_id}")
+            # B3-6: 캐시에서도 slope 체크 (조기 경보)
+            level_map = {"GREEN": 0, "YELLOW": 1, "ORANGE": 2, "RED": 3}
+            rev_map = {0: "GREEN", 1: "YELLOW", 2: "ORANGE", 3: "RED"}
+            slope = cached.get("slope_per_week", 0.0)
+            if slope and slope < -2.0:
+                current_idx = level_map.get(cached.get("latest_risk_level", "GREEN"), 0)
+                cached["latest_risk_level"] = rev_map.get(min(current_idx + 1, 3), "RED")
+                logger.info(
+                    f"Early warning (cached): slope {slope} < -2.0, "
+                    f"upgrading risk to {cached['latest_risk_level']}"
+                )
+                await redis_client.set_json(cache_key, cached, ttl=300)
+            return cached
+    except Exception as e:
+        logger.warning(f"Redis cache read failed: {e}")
+
+    # 캐시 miss: 기본값 반환 + 백그라운드 리프레시
+    logger.info(f"MCDI cache miss for {user_id}, using default + background refresh")
+    default_context = {
+        "latest_risk_level": "GREEN",
+        "latest_mcdi_score": None,
+        "score_trend": "stable",
+        "slope_per_week": 0.0,
+        "latest_scores": {},
+        "has_data": False
+    }
+
+    # 백그라운드 리프레시 (별도 함수 필요 시 background_tasks로 호출)
+    asyncio.create_task(_refresh_mcdi_context_background(user_id))
+
+    return default_context
+
+
+async def _refresh_mcdi_context_background(user_id: str) -> None:
+    """
+    백그라운드에서 MCDI 컨텍스트 리프레시
+
+    TimescaleDB 조회 후 Redis 캐시 저장. 웹훅 요청 차단 없음.
+    """
+    cache_key = f"mcdi_context:{user_id}"
+
+    try:
+        from core.memory.memory_manager import MemoryManager
+        mm = MemoryManager()
+        analytics = await mm.get_mcdi_analytics(user_id, days=14)
+
+        context = {
+            "latest_risk_level": analytics.get("latest_risk_level", "GREEN"),
+            "latest_mcdi_score": analytics.get("latest_mcdi_score"),
+            "score_trend": analytics.get("score_trend", "stable"),
+            "slope_per_week": analytics.get("slope_per_week", 0.0),
+            "latest_scores": analytics.get("latest_scores", {}),
+            "has_data": analytics.get("has_data", False)
+        }
+
+        # 조기 경보: slope < -2.0이면 risk_level 한 단계 상향
+        level_map = {"GREEN": 0, "YELLOW": 1, "ORANGE": 2, "RED": 3}
+        rev_map = {0: "GREEN", 1: "YELLOW", 2: "ORANGE", 3: "RED"}
+        if context["slope_per_week"] and context["slope_per_week"] < -2.0:
+            current_idx = level_map.get(context["latest_risk_level"], 0)
+            context["latest_risk_level"] = rev_map.get(min(current_idx + 1, 3), "RED")
+            logger.info(
+                f"Early warning (bg refresh): slope {context['slope_per_week']} < -2.0, "
+                f"upgrading risk to {context['latest_risk_level']}"
+            )
+
+        await redis_client.set_json(cache_key, context, ttl=300)
+        logger.info(
+            f"Background MCDI refresh complete for {user_id}",
+            extra={"risk_level": context["latest_risk_level"], "mcdi_score": context["latest_mcdi_score"]}
+        )
+
+    except Exception as e:
+        logger.warning(f"Background MCDI refresh failed for {user_id}: {e}")
+
+
 # ── 인지 도메인 질문 쿨다운 체크 (B3-4) ───────────────
 
 async def _check_probe_cooldown(user_id: str, domain: str) -> bool:
@@ -771,7 +893,7 @@ async def _pre_generate_evening_quiz(user_id: str) -> None:
             f"반드시 1문장으로만 출력하세요. 추가 설명이나 물음표 이외의 기호 없이."
         )
 
-        llm_service = LLMService()  # 기본 모델: sonnet-4-6
+        llm_service = get_llm_service()
         quiz_text = await asyncio.wait_for(
             llm_service.call(prompt=quiz_prompt),
             timeout=8.0
@@ -863,7 +985,7 @@ async def _evaluate_quiz_answer(user_id: str, user_answer: str) -> tuple[bool, s
 """
 
     try:
-        llm_service = LLMService()
+        llm_service = get_llm_service()
         result = await asyncio.wait_for(
             llm_service.call_json(prompt=eval_prompt),
             timeout=10.0
@@ -935,25 +1057,23 @@ async def _adjust_mcdi_rt_score(user_id: str, rt_adjustment: int) -> None:
                 logger.info(f"No MCDI analysis found for {user_id}, skipping RT adjustment")
                 return
 
-            # RT 점수 조정
-            scores = latest_analysis.scores or {}
-            current_rt = scores.get("RT", 50)
+            # RT 점수 조정 (개별 컬럼 사용)
+            current_rt = latest_analysis.rt_score or 50
             new_rt = max(0, min(100, current_rt + rt_adjustment))
 
-            scores["RT"] = new_rt
-            latest_analysis.scores = scores
+            latest_analysis.rt_score = new_rt
 
             # MCDI 점수 재계산
             from core.analysis.mcdi_calculator import MCDICalculator
             calculator = MCDICalculator()
-            new_mcdi_score = calculator.calculate(
-                lr_score=scores.get("LR", 50),
-                sd_score=scores.get("SD", 50),
-                nc_score=scores.get("NC", 50),
-                to_score=scores.get("TO", 50),
-                er_score=scores.get("ER", 50),
-                rt_score=new_rt
-            )
+            new_mcdi_score = calculator.calculate({
+                "LR": latest_analysis.lr_score or 50,
+                "SD": latest_analysis.sd_score or 50,
+                "NC": latest_analysis.nc_score or 50,
+                "TO": latest_analysis.to_score or 50,
+                "ER": latest_analysis.er_score or 50,
+                "RT": new_rt
+            })
 
             latest_analysis.mcdi_score = new_mcdi_score
 
@@ -1336,8 +1456,8 @@ async def kakao_webhook(
 
             # HIGH-2: 카테고리 선택 (약한 지표 우선, 주간 빈도 제한 적용)
             try:
-                from core.dialogue.category_selector import CategorySelector, get_category_prompt_hint
-                category_selector = CategorySelector()
+                from core.dialogue.category_selector import get_category_prompt_hint
+                category_selector = get_category_selector()
                 selected_category = await category_selector.select(user_id=user_id)
                 category_hint = get_category_prompt_hint(selected_category)
                 # 세션 컨텍스트에 카테고리 힌트 저장 → prompt_builder가 활용
@@ -1354,7 +1474,8 @@ async def kakao_webhook(
                 selected_category = "DAILY_EPISODIC"
 
             # B3-3: MCDI 컨텍스트 조회 후 응답 생성 (어댑티브 블록 활성화)
-            mcdi_context = await _get_mcdi_context(user_id)
+            # 캐시 전용 조회로 차단 방지 (DB 조회는 백그라운드로 처리)
+            mcdi_context = await _get_mcdi_context_fast(user_id)
 
             # ========== B3-5: 반복 발화 감지 후 risk_level 승격 (신규) ==========
             # 세션에서 최근 발화 가져오기
@@ -1375,16 +1496,16 @@ async def kakao_webhook(
                     )
             # ============================================================
 
-            # ========== 카카오 5초 타임아웃 방지: 4.5초 내 응답 ==========
+            # ========== 카카오 5초 타임아웃 방지: 4.7초 내 응답 ==========
             try:
-                # 4.5초 타임아웃으로 응답 생성 시도
+                # 4.7초 타임아웃으로 응답 생성 시도 (카카오 5초 제한 - 300ms 여유)
                 ai_response = await asyncio.wait_for(
                     dialogue_manager.generate_response(
                         user_id=user_id,
                         user_message=user_message_for_save,
                         mcdi_context=mcdi_context
                     ),
-                    timeout=4.5
+                    timeout=4.7
                 )
                 response_completed = True
                 logger.debug(
@@ -1394,9 +1515,9 @@ async def kakao_webhook(
             except asyncio.TimeoutError:
                 # 4.5초 초과: "생각 중" 메시지 즉시 반환, 실제 응답은 백그라운드로 생성
                 logger.warning(
-                    f"Response generation timeout (>4.5s) for {user_id}, sending holding message"
+                    f"Response generation timeout (>4.7s) for {user_id}, sending holding message"
                 )
-                holding_message = "네, 생각하고 있는 중이에요! 조금만 기다려 주세요 ㅎㅎ"
+                holding_message = "알맞은 답을 열심히 적고 있어요~ 아주쪼금후에 아무 톡!이나 주시면 바로 답변 나가요~~"
                 response_completed = False
 
                 # 즉시 "생각 중" 응답 반환 (타임아웃 방지)
@@ -1435,6 +1556,16 @@ async def kakao_webhook(
                 logger.info(
                     f"Gap message prepended for {user_id}",
                     extra={"user_id": user_id, "hours_since_last": hours_since_last}
+                )
+            # ====================================================================
+
+            # ========== 퀴즈 피드백 메시지 추가 ==========
+            if quiz_feedback:
+                # 퀴즈 피드백을 AI 응답 앞에 추가
+                ai_response = f"{quiz_feedback}\n\n{ai_response}"
+                logger.info(
+                    f"Quiz feedback prepended for {user_id}: {quiz_feedback[:50]}...",
+                    extra={"user_id": user_id, "quiz_feedback": quiz_feedback}
                 )
             # ====================================================================
 

@@ -126,54 +126,56 @@ ANALYSIS_PROMPTS = {
 # config/prompts.py
 
 FACT_EXTRACTION_PROMPT = """
-대화에서 저장할 가치가 있는 사실(fact)을 추출하세요.
+대화에서 기억을 추출하세요.
+
+========== JSON 출력 형식 (반드시 준수) ==========
+{{
+  "biographical_facts": [
+    {{"entity": "name", "value": "홍길동", "confidence": 0.95, "fact_type": "immutable"}}
+  ],
+  "episodic_facts": [
+    {{"content": "산에서 진달래 꽃을 보았다", "category": "event", "confidence": 0.9}}
+  ]
+}}
+====================================================
+
+## 1단계: Episodic First (기본)
+모든 발언을 episodic_facts로 저장하세요.
+- "산에서 진달래를 봤어" → episodic_facts
+- "점심에 제육 먹었어" → episodic_facts
+
+## 2단계: Biographical 승격 (특별한 경우만)
+⛔ 제외: 꽃/식물(진달래, 쑥, 봄), 동물, 자연은 절대 사람 이름 아님
+
+🚨 절대 규칙: biographical_facts는 **반드시 "사용자" 발화에서만** 추출하세요.
+"정원사" 발화에서 언급된 이름/정보는 절대 사용자의 정보로 추출하지 마세요.
+(예: 정원사가 "성대님"이라고 말해도, 그것을 사용자 이름으로 추출 금지.
+사용자가 직접 "내 이름은 X야"라고 말한 경우에만 name으로 추출.)
+
+🚨 제3자 컨텍스트 제외: 발화에 다음 단어가 함께 나오면 본인 이름이 아닌 제3자임:
+- 직책: 이사, 사장, 박사, 교수, 부장, 과장, 대리, 회장
+- 관계어: 동료, 친구, 이모, 삼촌, 아저씨, 아주머니
+- 회사/조직: "우리 회사 X", "X 이사", "X 동료"
+(예: "박성대 이사님 결혼식" → name으로 추출 금지)
+
+✅ 승격 조건:
+- name: "내 이름은 홍길동", "나는 철수야", "이름을 X로 바꿔줘"
+- nickname: "나를 OO라고 불러줘"
+- daughter_name/son_name: "딸은 수진이야", "아들은 민수야"
+- favorite_food: "제육 좋아해", "OO이 제일 좋아"
+- hometown: "고향은 부산"
+- hobby: "등산이 취미야"
+- occupation: "직업은 선생님"
+
+❌ 제외 (단순 언급):
+- "딸과 갔어", "제육 먹었어", "산에 갔어"
+
+## 카테고리
+- event, food, activity, place, person, time, emotion, object, health
 
 ## 입력
 - 현재 시간: {current_time}
-
 {conversation_history}
-
-## 추출 대상
-1. 전기적 사실 (Biographical Facts)
-   - 불변: 이름, 생년월일, 출생지, 자녀 이름
-   - 반불변: 거주지, 직업, 종교
-   - 선호: 좋아하는 음식, 취미
-
-2. 일화적 사실 (Episodic Facts)
-   - 사건: "2025-01-15 점심에 된장찌개 먹음"
-   - 감정: "딸과 통화해서 기분 좋음"
-   - 인물: "손녀 이름은 지우"
-
-## 카테고리 (반드시 아래 중 하나 사용)
-- person: 인물
-- place: 장소
-- food: 음식 (meal, 식사 포함)
-- event: 사건
-- time: 시간
-- emotion: 감정
-- activity: 활동
-- object: 사물
-- health: 건강 상태
-
-## 출력 형식 (JSON)
-{{
-  "biographical_facts": [
-    {{
-      "entity": "daughter_name",
-      "value": "수진",
-      "confidence": 0.95,
-      "fact_type": "immutable"
-    }}
-  ],
-  "episodic_facts": [
-    {{
-      "content": "2025-01-15 점심에 된장찌개와 김치, 멸치볶음 먹음",
-      "timestamp": "{current_time}",
-      "category": "food",
-      "confidence": 0.9
-    }}
-  ]
-}}
 """
 
 # ============================================

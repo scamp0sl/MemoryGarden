@@ -27,7 +27,7 @@ from core.analysis.analyzer import Analyzer
 from core.analysis.risk_evaluator import RiskEvaluator
 from core.dialogue.dialogue_manager import DialogueManager
 from services.notification_service import NotificationService
-from services.llm_service import LLMService
+from services.llm_service import get_llm_service
 from core.nlp.embedder import Embedder
 from utils.logger import get_logger
 
@@ -71,7 +71,7 @@ def get_session_workflow() -> SessionWorkflow:
             # ============================================
             # Step 1: LLM 서비스 초기화
             # ============================================
-            llm_service = LLMService()
+            llm_service = get_llm_service()
             logger.debug("✅ LLMService initialized")
 
             # ============================================

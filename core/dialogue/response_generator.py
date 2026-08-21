@@ -24,7 +24,7 @@ from datetime import datetime
 # ============================================
 from config.settings import settings
 from core.dialogue.prompt_builder import PromptBuilder
-from services.llm_service import LLMService
+from services.llm_service import get_llm_service
 from utils.logger import get_logger
 from utils.exceptions import AnalysisError
 
@@ -36,9 +36,8 @@ logger = get_logger(__name__)
 # ============================================
 # 5. 상수 정의
 # ============================================
-DEFAULT_MODEL = "sonnet-4-6"  # Claude Sonnet 4.6
 DEFAULT_TEMPERATURE = 0.7
-DEFAULT_MAX_TOKENS = 150  # 짧은 응답 권장 (Claude는 GPT보다 긴 응답 생성 경향)
+DEFAULT_MAX_TOKENS = 150
 
 
 # ============================================
@@ -71,7 +70,6 @@ class ResponseGenerator:
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         prompt_builder: Optional[PromptBuilder] = None
@@ -80,23 +78,22 @@ class ResponseGenerator:
         ResponseGenerator 초기화
 
         Args:
-            model: Claude 모델명 (sonnet/opus/haiku)
             temperature: 생성 온도 (높을수록 창의적, 낮을수록 일관적)
             max_tokens: 최대 토큰 수
             prompt_builder: 프롬프트 빌더 (None이면 생성)
         """
-        self.llm_service = LLMService(model=model, temperature=temperature, max_tokens=max_tokens)
-        self.model = model
+        self.llm_service = get_llm_service(temperature=temperature, max_tokens=max_tokens)
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.prompt_builder = prompt_builder or PromptBuilder()
 
         logger.info(
-            "ResponseGenerator initialized with Claude",
+            "ResponseGenerator initialized",
             extra={
-                "model": model,
+                "provider": settings.LLM_PROVIDER,
+                "model": getattr(self.llm_service, "model", "unknown"),
                 "temperature": temperature,
-                "max_tokens": max_tokens
+                "max_tokens": max_tokens,
             }
         )
 

@@ -157,13 +157,23 @@ async def lifespan(app: FastAPI):
 
         # Embedder 워밍 (OpenAI Embedding 연결)
         from core.nlp.embedder import Embedder
-        _ = Embedder()
+        warmup_embedder = Embedder()
         logger.info("  ✓ Embedder loaded")
 
-        # DialogueManager 워밍
+        # DialogueManager 워밍 + webhook 싱글톤에 주입
         from core.dialogue.dialogue_manager import DialogueManager
-        _ = DialogueManager()
+        warmup_dm = DialogueManager()
         logger.info("  ✓ DialogueManager loaded")
+
+        # webhook 모듈의 싱글톤에 직접 할당
+        import api.routes.kakao_webhook as webhook_module
+        webhook_module._dialogue_manager = warmup_dm
+        logger.info("  ✓ DialogueManager injected into webhook singleton")
+
+        # Analyzer도 싱글톤에 주입 (매번 LLMService/Embedder 생성 방지)
+        from core.analysis.analyzer import Analyzer
+        webhook_module._analyzer = Analyzer(default_llm_service, warmup_embedder)
+        logger.info("  ✓ Analyzer injected into webhook singleton")
 
         # KakaoClient 워밍 (lazy import 방지)
         from services.kakao_client import KakaoClient
@@ -179,6 +189,36 @@ async def lifespan(app: FastAPI):
 
     except Exception as e:
         logger.warning(f"⚠️ Component warm-up incomplete (will load on demand): {e}")
+
+    # ============================================
+    # API Warm-up: 첫 요청 cold start 방지
+    # ============================================
+    try:
+        logger.info("🔥 Warming up external API connections...")
+
+        # OpenAI Embedding 사전 호출 (첫 요청 ~2초 지연 방지)
+        try:
+            warmup_embedding = await warmup_embedder.embed("warmup")
+            logger.info(f"  ✓ OpenAI Embedding warmed up (dim={len(warmup_embedding)})")
+        except Exception as e:
+            logger.warning(f"  ⚠️ OpenAI Embedding warm-up failed: {e}")
+
+        # LLM API 사전 호출 (첫 요청 ~2초 지연 방지)
+        try:
+            from services.llm_service import default_llm_service
+            from config.settings import settings as _s
+            warmup_resp = await default_llm_service.call(
+                prompt="warmup",
+                max_tokens=5
+            )
+            logger.info(f"  ✓ LLM API warmed up (provider={_s.LLM_PROVIDER}, resp: {warmup_resp[:20]})")
+        except Exception as e:
+            logger.warning(f"  ⚠️ LLM API warm-up failed (provider={settings.LLM_PROVIDER}): {e}")
+
+        logger.info("✅ External API connections warmed up")
+
+    except Exception as e:
+        logger.warning(f"⚠️ API warm-up incomplete: {e}")
 
     logger.info("=" * 60)
     logger.info(f"✅ Memory Garden API Started!")

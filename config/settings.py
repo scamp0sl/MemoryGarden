@@ -30,12 +30,26 @@ class Settings(BaseSettings):
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_API_KEY: Optional[str] = None
     
-    # AI Services
+    # AI Services - Provider 선택 (anthropic | openai | deepseek)
+    LLM_PROVIDER: str = "anthropic"
+
+    # Anthropic Claude
     CLAUDE_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
+    CLAUDE_MODEL: str = "claude-sonnet-4-6"
+
+    # OpenAI
     OPENAI_API_KEY: Optional[str] = None
-    CLAUDE_MODEL: str = "claude-4-5-sonnet-20250929"
-    GPT_MODEL: str = "gpt-4o-mini"
+    GPT_MODEL: str = "gpt-4o"
+    VISION_MODEL: str = "gpt-4o"
+
+    # DeepSeek (OpenAI 호환 API)
+    DEEPSEEK_API_KEY: Optional[str] = None
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    # reasoning 모델은 thinking 토큰이 max_tokens를 선점하므로 충분히 크게 설정
+    # deepseek-v4-pro 기준 thinking ~1000~3000토큰 + 실제 답변 토큰
+    DEEPSEEK_MAX_TOKENS: int = 4000
     
     # Kakao
     KAKAO_REST_API_KEY: Optional[str] = None

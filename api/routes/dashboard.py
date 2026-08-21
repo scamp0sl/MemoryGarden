@@ -19,11 +19,44 @@ from sqlalchemy import select, func, cast, Date, and_, desc
 
 from database.postgres import get_db
 from database.models import User, Conversation, AnalysisResult, GardenStatus
+from database.redis_client import redis_client
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
+
+
+# ============================================
+# Helper Functions
+# ============================================
+
+async def get_biographical_names(user_ids: List[str]) -> Dict[str, str]:
+    """Redis에서 여러 사용자의 biographical name을 일괄 조회
+
+    Args:
+        user_ids: 사용자 ID 목록
+
+    Returns:
+        {user_id: name} 매핑 (없으면 빈 문자열)
+    """
+    names = {}
+    if not user_ids:
+        return names
+
+    try:
+        # Redis에서 패턴 매칭으로 name entity만 일괄 조회
+        for user_id in user_ids:
+            name_key = f"biographical:{user_id}:name"
+            name_data = await redis_client.get_json(name_key)
+            if name_data and isinstance(name_data, dict):
+                name_value = name_data.get("value", "")
+                if name_value:
+                    names[user_id] = name_value
+    except Exception as e:
+        logger.warning(f"Failed to fetch biographical names: {e}")
+
+    return names
 
 
 # ============================================
@@ -161,6 +194,11 @@ async def get_users_daily_status(
         last_conv_time_map = {str(row[0]): row[1] for row in last_conv_time_q.fetchall()}
         # ──────────────────────────────────────────────────────────────────
 
+        # ── biographical name 일괄 조회 ────────────────────────────────────
+        user_ids = [str(u.id) for u in users]
+        biographical_names = await get_biographical_names(user_ids)
+        # ──────────────────────────────────────────────────────────────────
+
         # 정렬: 실제 최근 대화 기준 내림차순
         users = sorted(
             users,
@@ -233,6 +271,8 @@ async def get_users_daily_status(
                     if real_last_at else True
                 ),
                 "kakao_channel_user_key": user.kakao_channel_user_key or "",
+                # ✅ biographical fact의 name (우선순위: biographical_name > name)
+                "biographical_name": biographical_names.get(uid_str, ""),
                 "last_message": (last_conv[0][:60] + "…" if last_conv and last_conv[0] and len(last_conv[0]) > 60 else (last_conv[0] if last_conv else None)),
                 "last_response": (last_conv[1][:60] + "…" if last_conv and last_conv[1] and len(last_conv[1]) > 60 else (last_conv[1] if last_conv else None)),
                 "last_category": last_conv[2] if last_conv else None,

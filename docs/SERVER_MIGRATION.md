@@ -378,7 +378,7 @@ curl -s http://localhost:8002/docs -o /dev/null -w '%{http_code}\n'
 - [ ] 인덱스 35개 / 하이퍼테이블 청크 18개 / 연속집계 1개
 - [ ] Qdrant `points_count` 일치
 - [ ] Redis `DBSIZE` 일치
-- [ ] `/health` 200
+- [ ] `/health` 200 이고 `postgresql`/`redis`/`qdrant` 모두 `ok`
 - [ ] `.env`의 `KAKAO_REDIRECT_URI`가 새 도메인 & 카카오 콘솔과 일치
 - [ ] Firebase 서비스 계정 경로(`config/firebase-adminsdk.json`) 존재 및 권한 600
 - [ ] `SECRET_KEY` 기존 값 유지
@@ -481,3 +481,4 @@ c217489  fix: 퀴즈 완료 후 회상 문맥 제거
 | `pip: command not found` (venv 내) | uv로 만든 venv에는 pip이 없음 → §6 방법 A로 재생성 |
 | LLM 호출이 엉뚱한 엔드포인트로 감 | `ANTHROPIC_BASE_URL` 환경변수 상속 문제. `start_server.sh`가 이를 해결함 |
 | 카카오 웹훅 타임아웃 | nginx `proxy_read_timeout 30s` 이상 확인 |
+| `/health`의 qdrant가 `skipped` | 커밋 `0930aa5` 이전 버전의 버그(`database.qdrant` 오타). 최신 `main`에서는 `ok (N collections)`로 표시됨 |

@@ -644,15 +644,15 @@ async def health_check() -> Dict[str, Any]:
     
     # Qdrant 체크 (푸시 알림에 불필요, 선택적)
     try:
-        try:
-            from database.qdrant import qdrant_client
-        except ImportError:
-            health_status["dependencies"]["qdrant"] = "not required (push notifications work without it)"
-            # 푸시 알림 테스트에는 영향 없으므로 degraded 상태로 만들지 않음
-            raise ImportError("Qdrant module not found")
+        from database.qdrant_client import qdrant_manager
 
-        collections = await qdrant_client.get_collections()
-        health_status["dependencies"]["qdrant"] = f"ok ({len(collections.collections)} collections)"
+        client = qdrant_manager.client
+        if client is None:
+            # startup에서 초기화되지 않았거나 연결 실패한 경우
+            health_status["dependencies"]["qdrant"] = "unavailable (client not initialized)"
+        else:
+            collections = await client.get_collections()
+            health_status["dependencies"]["qdrant"] = f"ok ({len(collections.collections)} collections)"
     except Exception as e:
         health_status["dependencies"]["qdrant"] = f"skipped: {str(e)}"
         # status는 "ok" 유지 (Qdrant는 선택적)

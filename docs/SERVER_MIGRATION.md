@@ -26,7 +26,7 @@ docker compose up -d          # postgres(timescale) / redis / qdrant
 # 4) 파이썬
 python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# 5) 데이터 복원 (§5)
+# 5) 데이터 복원 (§5) — TimescaleDB는 pre_restore/post_restore 필수!
 # 6) 기동
 ./start_server.sh && curl -s localhost:8002/health
 ```
@@ -54,6 +54,9 @@ python3.13 -m venv .venv && .venv/bin/pip install -r requirements.txt
 | PostgreSQL | `users` | 30 |
 | PostgreSQL | `conversations` | 2,872 |
 | PostgreSQL | `analysis_results` | 2,437 |
+| PostgreSQL | `analysis_timeseries` (하이퍼테이블 18청크) | 9,256 |
+| PostgreSQL | `mcdi_daily_avg` (연속집계) | 733 |
+| PostgreSQL | `garden_status` | 19 |
 | PostgreSQL | DB 전체 | 약 25 MB |
 | Qdrant | `episodic_memory` | 3,206 points (1536-dim, Cosine) |
 | Qdrant | `biographical_memory` | 278 points (1536-dim, Cosine) |
@@ -145,19 +148,70 @@ docker compose ps          # 3개 모두 healthy 확인
 
 > compose의 `POSTGRES_PASSWORD`는 `password`(기본값)입니다. `.env`의 `DATABASE_URL` 비밀번호와 반드시 일치시키세요.
 
-### 5-2. PostgreSQL 복원
+### 5-2. PostgreSQL 복원 ⚠️ TimescaleDB 전용 절차
+
+> **단순 `psql < dump` 로 복원하면 안 됩니다.**
+> `analysis_timeseries`는 TimescaleDB **하이퍼테이블**(18 청크), `mcdi_daily_avg`는 **연속 집계(continuous aggregate)** 입니다.
+> 단순 복원 시 데이터는 들어가지만 `analysis_timeseries_pkey` **PRIMARY KEY가 누락**됩니다
+> (실측: 인덱스 35 → 34). 아래 `pre_restore` / `post_restore` 절차를 반드시 사용하세요.
 
 ```bash
+# 1) 확장 설치 + 복원 모드 진입
+docker exec -i memgarden-postgres psql -U memgarden -d memory_garden \
+  -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" \
+  -c "SELECT timescaledb_pre_restore();"
+
+# 2) 덤프 복원
 gunzip -c data/postgres_memory_garden.sql.gz \
   | docker exec -i memgarden-postgres psql -U memgarden -d memory_garden
 
-# 확인
-docker exec memgarden-postgres psql -U memgarden -d memory_garden \
-  -c "SELECT count(*) FROM users;  SELECT count(*) FROM conversations;"
+# 3) 복원 모드 해제 (필수 — 빠뜨리면 백그라운드 작업이 멈춘 상태로 남음)
+docker exec -i memgarden-postgres psql -U memgarden -d memory_garden \
+  -c "SELECT timescaledb_post_restore();"
 ```
 
-> 덤프는 `--no-owner --no-acl`로 생성되었습니다. TimescaleDB 확장이 먼저 설치되어 있어야 하므로
-> **compose로 timescaledb 이미지를 띄운 뒤** 복원하세요.
+#### 복원 검증
+
+```bash
+docker exec memgarden-postgres psql -U memgarden -d memory_garden -tAc "
+SELECT 'users', count(*) FROM users
+UNION ALL SELECT 'conversations', count(*) FROM conversations
+UNION ALL SELECT 'analysis_results', count(*) FROM analysis_results
+UNION ALL SELECT 'analysis_timeseries', count(*) FROM analysis_timeseries
+UNION ALL SELECT 'mcdi_daily_avg', count(*) FROM mcdi_daily_avg
+UNION ALL SELECT 'garden_status', count(*) FROM garden_status;"
+```
+
+기대값 (이관 시점 실측):
+
+| 테이블 | 행수 |
+|--------|------|
+| `users` | 30 |
+| `conversations` | 2,872 |
+| `analysis_results` | 2,437 |
+| `analysis_timeseries` (하이퍼테이블) | 9,256 |
+| `mcdi_daily_avg` (연속집계) | 733 |
+| `garden_status` | 19 |
+
+구조도 함께 확인하세요.
+
+```bash
+docker exec memgarden-postgres psql -U memgarden -d memory_garden -tAc "
+SELECT count(*) FROM pg_indexes WHERE schemaname='public';"                        # 35
+docker exec memgarden-postgres psql -U memgarden -d memory_garden -tAc "
+SELECT hypertable_name, num_chunks FROM timescaledb_information.hypertables;"      # analysis_timeseries | 18
+docker exec memgarden-postgres psql -U memgarden -d memory_garden -tAc "
+SELECT view_name FROM timescaledb_information.continuous_aggregates;"              # mcdi_daily_avg
+docker exec memgarden-postgres psql -U memgarden -d memory_garden -tAc "
+SELECT conname FROM pg_constraint WHERE conrelid='public.analysis_timeseries'::regclass;"  # analysis_timeseries_pkey
+```
+
+> ✅ 위 절차는 이관 전 실제 임시 DB에 복원해 **에러 0건 / 전 항목 원본 일치**로 검증했습니다.
+> (행수 11개 테이블, 인덱스 35, 제약조건 22, 청크 18, 연속집계 1, alembic `20260330_1013` 모두 일치)
+
+> `pre_restore` 없이 단순 복원하면 아래 2개 에러가 납니다. 데이터는 들어가지만 **PK가 빠집니다.**
+> - `ERROR: duplicate key value violates unique constraint "metadata_pkey"` (무해)
+> - `ERROR: ONLY option not supported on hypertable operations` ← **PK 누락 원인**
 
 ### 5-3. Redis 복원
 
@@ -319,7 +373,9 @@ curl -s http://localhost:8002/docs -o /dev/null -w '%{http_code}\n'
 ```
 
 - [ ] `docker compose ps` 3개 healthy
-- [ ] PostgreSQL 행수가 §1 표와 일치
+- [ ] PostgreSQL 행수가 §1 표와 일치 (`analysis_timeseries` 9,256 포함)
+- [ ] `analysis_timeseries_pkey` 존재 (TimescaleDB 복원 절차 준수 여부 판단 기준)
+- [ ] 인덱스 35개 / 하이퍼테이블 청크 18개 / 연속집계 1개
 - [ ] Qdrant `points_count` 일치
 - [ ] Redis `DBSIZE` 일치
 - [ ] `/health` 200
@@ -417,6 +473,8 @@ c217489  fix: 퀴즈 완료 후 회상 문맥 제거
 | 증상 | 원인 / 조치 |
 |------|------------|
 | `logs/fastapi.log: No such file or directory` | `logs/`는 gitignore 대상 → `mkdir -p logs` |
+| `analysis_timeseries` 가 0행 | 하이퍼테이블 청크 미복원. §5-2의 `pre_restore` 절차로 재복원 |
+| `ONLY option not supported on hypertable` | `timescaledb_pre_restore()` 없이 복원함 → PK 누락. §5-2 참조 |
 | `alembic` 리비전 불일치 | 덤프 복원 시 `alembic_version` 테이블도 함께 복원됨. `alembic current`로 확인 |
 | Qdrant 검색 결과 0건 | 임베딩 차원 확인 (1536이어야 함), 컬렉션명 확인 |
 | `dubious ownership` git 오류 | `git config --global --add safe.directory <경로>` |
